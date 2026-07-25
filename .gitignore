@@ -44,3 +44,7 @@ yarn.lock
 # Other
 .DS_Store
 *.iml
+/config.yaml
+/data/bilibili_reply.db-shm
+/data/bilibili_reply.db-wal
+/data/bilibili_reply.db
