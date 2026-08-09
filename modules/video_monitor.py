@@ -241,8 +241,10 @@ async def reply_to_new_comments(bvid: str, reply_template: str = "感谢评论�
     failed_count = 0
 
     for idx, cmt in enumerate(new_comments, 1):
-        username = cmt['member']['uname']
+        member_info = cmt.get('member', {})
+        username = member_info.get('uname', '')
         message = cmt['content']['message']
+        user_mid = member_info.get('mid')
 
         if use_ai:
             style_tag = f"[{ai_style or 'default'}]"
@@ -258,8 +260,16 @@ async def reply_to_new_comments(bvid: str, reply_template: str = "感谢评论�
         if success:
             success_count += 1
             from datetime import datetime
-            user_comment_time = datetime.fromtimestamp(cmt['ctime']).strftime('%Y-%m-%d %H:%M:%S')
-            reply_record_manager.mark_replied_with_details(bvid, cmt['rpid'], username, message, user_comment_time, reply_message)
+            user_comment_time = datetime.fromtimestamp(cmt.get('ctime', 0)).strftime('%Y-%m-%d %H:%M:%S')
+            reply_record_manager.mark_replied_with_details(
+                bvid,
+                cmt['rpid'],
+                username=username,
+                message=message,
+                mid=user_mid,
+                user_comment_time=user_comment_time,
+                ai_reply=reply_message
+            )
         else:
             failed_count += 1
 

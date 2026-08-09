@@ -48,6 +48,7 @@ class DatabaseManager:
                            rpid TEXT NOT NULL,
                            username TEXT,
                            message TEXT,
+                           mid TEXT,
                            user_comment_time TIMESTAMP,
                            ai_reply TEXT,
                            replied_at TIMESTAMP,
@@ -57,6 +58,13 @@ class DatabaseManager:
         # 检查并添加缺失的列
         cursor.execute("PRAGMA table_info(replied_comments)")
         columns = [row[1] for row in cursor.fetchall()]
+
+        if 'mid' not in columns:
+            try:
+                cursor.execute("ALTER TABLE replied_comments ADD COLUMN mid TEXT")
+                logger.info("成功添加 mid 字段到 replied_comments 表")
+            except Exception as e:
+                logger.error(f"添加 mid 字段失败: {e}")
 
         if 'user_comment_time' not in columns:
             try:
@@ -126,7 +134,7 @@ class DatabaseManager:
         cursor.close()
         return result is not None
 
-    def mark_comment_replied(self, bvid: str, rpid: str, username: str = None, message: str = None, user_comment_time=None, ai_reply=None, replied_at=None):
+    def mark_comment_replied(self, bvid: str, rpid: str, username: str = None, message: str = None, mid=None, user_comment_time=None, ai_reply=None, replied_at=None):
         """标记评论为已回复"""
         if replied_at is None:
             replied_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -136,9 +144,9 @@ class DatabaseManager:
         try:
             logger.debug(f"标记评论已回复: BVID={bvid}, RPID={rpid}, 用户={username}")
             cursor.execute('''
-                INSERT OR REPLACE INTO replied_comments (bvid, rpid, username, message, user_comment_time, ai_reply, replied_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            ''', (bvid, rpid, username, message, user_comment_time, ai_reply, replied_at))
+                INSERT OR REPLACE INTO replied_comments (bvid, rpid, username, message, mid, user_comment_time, ai_reply, replied_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (bvid, rpid, username, message, mid, user_comment_time, ai_reply, replied_at))
             conn.commit()
             logger.debug(f"评论回复标记成功: {bvid}/{rpid}")
         except Exception as e:
@@ -268,13 +276,13 @@ class ReplyRecordManager:
         self.initialize()
         return database_manager.is_comment_replied(bvid, rpid)
 
-    def mark_replied(self, bvid, rpid, username=None, message=None):
+    def mark_replied(self, bvid, rpid, username=None, message=None, mid=None, user_comment_time=None):
         self.initialize()
-        database_manager.mark_comment_replied(bvid, rpid, username, message)
+        database_manager.mark_comment_replied(bvid, rpid, username, message, mid, user_comment_time)
 
-    def mark_replied_with_details(self, bvid, rpid, username=None, message=None, user_comment_time=None, ai_reply=None):
+    def mark_replied_with_details(self, bvid, rpid, username=None, message=None, mid=None, user_comment_time=None, ai_reply=None):
         self.initialize()
-        database_manager.mark_comment_replied(bvid, rpid, username, message, user_comment_time, ai_reply)
+        database_manager.mark_comment_replied(bvid, rpid, username, message, mid, user_comment_time, ai_reply)
 
     def get_replied_count(self, bvid):
         self.initialize()
