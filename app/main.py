@@ -278,6 +278,28 @@ async def main():
     video_discovery_manager.initialize()
     monitored_video_manager.initialize()
 
+    # 启动时校验 B 站登录态，提前发现 Cookie 失效
+    try:
+        from .api_clients import CredentialManager
+        cred = CredentialManager().get_credential()
+        if await cred.check_refresh():
+            logger.info("检测到 Cookie 可刷新，正在尝试 refresh…")
+            try:
+                await cred.refresh()
+                logger.info("Cookie 刷新成功")
+            except Exception as e:
+                logger.warning(f"Cookie 自动刷新失败（将继续使用现有凭证）: {e}")
+        valid = await cred.check_valid()
+        if valid:
+            logger.info("B站登录态校验通过")
+        else:
+            logger.error(
+                "B站登录态无效（账号未登录）。"
+                "发评论会失败(-101)。请重新从浏览器复制 Cookie 到 config.yaml 后重启。"
+            )
+    except Exception as e:
+        logger.error(f"B站登录态校验失败: {e}")
+
     # 将 config.yaml 中残留的 videos 导入数据库并清空 YAML
     imported = config_manager.migrate_seed_videos_to_db()
 

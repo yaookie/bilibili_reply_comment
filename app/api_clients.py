@@ -20,12 +20,28 @@ class CredentialManager:
         if self._credential is None:
             cred_config = ConfigManager().get_bilibili_credential() or {}
 
-            required = ['sessdata', 'bili_jct', 'buvid3', 'dedeuserid']
-            missing = []
-            for k in required:
-                val = cred_config.get(k)
-                if not val or str(val).startswith('请填写'):
-                    missing.append(k)
+            def _clean(key):
+                val = cred_config.get(key)
+                if val is None:
+                    return None
+                return str(val).strip()
+
+            sessdata = _clean('sessdata')
+            bili_jct = _clean('bili_jct')
+            buvid3 = _clean('buvid3')
+            dedeuserid = _clean('dedeuserid')
+            ac_time_value = _clean('ac_time_value')
+
+            required = {
+                'sessdata': sessdata,
+                'bili_jct': bili_jct,
+                'buvid3': buvid3,
+                'dedeuserid': dedeuserid,
+            }
+            missing = [
+                k for k, v in required.items()
+                if not v or str(v).startswith('请填写')
+            ]
             if missing:
                 raise ValueError(
                     f"B站凭证缺少必填项: {', '.join(missing)}。"
@@ -34,13 +50,17 @@ class CredentialManager:
                 )
 
             self._credential = Credential(
-                sessdata=cred_config['sessdata'],
-                bili_jct=cred_config['bili_jct'],
-                buvid3=cred_config['buvid3'],
-                dedeuserid=str(cred_config['dedeuserid']),
-                ac_time_value=cred_config.get('ac_time_value')
+                sessdata=sessdata,
+                bili_jct=bili_jct,
+                buvid3=buvid3,
+                dedeuserid=dedeuserid,
+                ac_time_value=ac_time_value
             )
         return self._credential
+
+    def reset(self):
+        """清除缓存的凭证（Cookie 更新后可调用）"""
+        self._credential = None
 
 
 class QwenClient:

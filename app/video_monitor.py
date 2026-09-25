@@ -279,7 +279,15 @@ async def reply_to_single_comment(oid: int, bvid: str, cmt: dict,
 
     except Exception as e:
         error_msg = str(e)
-        logger.error(f"✗ 回复 @{username} 失败 (rpid: {rpid}): {error_msg}", exc_info=True)
+        # -101 未登录：Cookie 失效/不完整，无需整段 traceback 刷屏
+        if '-101' in error_msg or '账号未登录' in error_msg:
+            logger.error(
+                f"✗ 回复 @{username} 失败: 账号未登录(-101)。"
+                f"请重新从浏览器复制 SESSDATA、bili_jct、buvid3、DedeUserID、ac_time_value "
+                f"到 config.yaml（需同一登录态），然后重启。"
+            )
+        else:
+            logger.error(f"✗ 回复 @{username} 失败 (rpid: {rpid}): {error_msg}", exc_info=True)
         logger.error(f"准备回复的内容: {reply_message}")
         logger.error(f"收到评论: {original_message}")
         return False, error_msg
