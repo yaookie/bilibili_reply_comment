@@ -227,6 +227,28 @@ class DatabaseManager:
         cursor.close()
         return count
 
+    def list_discovered_videos(self, uid: str = None) -> list:
+        """列出已发现视频（可用于回填监控列表）"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        if uid:
+            cursor.execute(
+                '''SELECT uid, bvid, title, discovered_at FROM discovered_videos
+                   WHERE uid = ? ORDER BY discovered_at ASC''',
+                (str(uid),)
+            )
+        else:
+            cursor.execute(
+                '''SELECT uid, bvid, title, discovered_at FROM discovered_videos
+                   ORDER BY discovered_at ASC'''
+            )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [
+            {'uid': uid_, 'bvid': bvid, 'title': title, 'discovered_at': discovered_at}
+            for uid_, bvid, title, discovered_at in rows
+        ]
+
     # ---------- 监控视频 ----------
     def list_monitored_videos(self, enabled_only: bool = True) -> list:
         """获取监控视频列表"""
@@ -491,6 +513,9 @@ class MonitoredVideoManager:
     def initialize(self):
         if self._initialized:
             return
+        # 确保底层数据库已就绪
+        if database_manager._db_path is None:
+            database_manager.initialize()
         self._initialized = True
 
     def list_videos(self, enabled_only: bool = True) -> list:
@@ -523,6 +548,39 @@ class MonitoredVideoManager:
     def count(self, enabled_only: bool = True) -> int:
         self.initialize()
         return database_manager.get_monitored_count(enabled_only=enabled_only)
+
+    def backfill_from_discovered(self, template: str = None, interval: int = None,
+                                 use_ai: bool = True, ai_style: str = None,
+                                 uid: str = None) -> int:
+        """当 monitored_videos 为空时，用 discovered_videos 回填。返回新增条数。"""
+        self.initialize()
+        if self.count(enabled_only=False) > 0:
+            return 0
+
+        discovered = database_manager.list_discovered_videos(uid=uid)
+        if not discovered:
+            return 0
+
+        # 同一 bvid 可能对应多个 uid 记录，按 bvid 去重
+        seen = set()
+        added = 0
+        for item in discovered:
+            bvid = item.get('bvid')
+            if not bvid or bvid in seen:
+                continue
+            seen.add(bvid)
+            inserted = self.add_or_update(
+                bvid=bvid,
+                title=item.get('title'),
+                template=template,
+                interval=interval,
+                use_ai=use_ai,
+                ai_style=ai_style,
+                enabled=True,
+            )
+            if inserted:
+                added += 1
+        return added
 
 
 monitored_video_manager = MonitoredVideoManager()

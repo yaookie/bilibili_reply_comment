@@ -20,54 +20,81 @@ class AutoReplyService:
         self._task_cleanup_interval = 3600  # 每小时清理一次已完成的任务
 
     def start(self):
-        """启动服务"""
+        """启动服务：从数据库加载监控视频并创建任务"""
         self.running = True
         logger.info("=" * 60)
         logger.info("多视频自动回复监控系统启动")
         logger.info("=" * 60)
 
-        videos_config = ConfigManager().get_videos_config()
         app_config = ConfigManager().get_app_config()
         default_interval = app_config.get('default_check_interval', 60)
+        default_ai_style = app_config.get('default_ai_style', 'humorous')
+        default_template = "@{username} 感谢你的评论！"
 
         # 获取UP主UID配置（可选）
         self.uploader_uid = app_config.get('uploader_uid')
         self.video_discovery_interval = app_config.get('video_discovery_interval', 300)
 
-        # 确保 videos_config 是列表
+        # 监控列表只从数据库读取（不再依赖 config.yaml 的 videos）
+        if monitored_video_manager.count(enabled_only=False) == 0:
+            backfilled = monitored_video_manager.backfill_from_discovered(
+                template=default_template,
+                interval=default_interval,
+                use_ai=True,
+                ai_style=default_ai_style,
+                uid=str(self.uploader_uid) if self.uploader_uid else None,
+            )
+            if backfilled:
+                logger.info(f"monitored_videos 为空，已从 discovered_videos 回填 {backfilled} 个视频")
+
+        videos_config = monitored_video_manager.list_videos(enabled_only=True)
+        logger.info(
+            f"从数据库加载监控视频: {len(videos_config)} 个 "
+            f"(db={database_manager._db_path})"
+        )
+
         if not videos_config:
-            logger.warning("配置文件中没有视频配置，将仅使用自动发现功能（如果配置了 uploader_uid）")
-            videos_config = []
+            logger.warning(
+                "数据库中没有启用的监控视频。"
+                "可配置 uploader_uid 自动发现，或在 config.yaml 的 videos 写入种子后重启导入。"
+            )
 
         tasks = []
         for config in videos_config:
             if isinstance(config, str):
                 bvid = config
-                template = "@{username} 感谢你的评论！"
+                template = default_template
                 interval = default_interval
                 use_ai = False
                 ai_style = None
             elif isinstance(config, dict):
-                bvid = config['bvid']
-                template = config.get('template', "@{username} 感谢你的评论！")
-                interval = config.get('interval', default_interval)
-                use_ai = config.get('use_ai', False)
-                ai_style = config.get('ai_style', app_config.get('default_ai_style', 'humorous') if use_ai else None)
+                bvid = config.get('bvid')
+                if not bvid:
+                    logger.warning(f"跳过无效的视频配置: {config}")
+                    continue
+                template = config.get('template') or default_template
+                interval = config.get('interval') or default_interval
+                use_ai = bool(config.get('use_ai', False))
+                ai_style = config.get('ai_style')
+                if use_ai and not ai_style:
+                    ai_style = default_ai_style
             else:
                 logger.warning(f"跳过无效的视频配置: {config}")
                 continue
 
-            task = asyncio.create_task(monitor_single_video(bvid, template, interval, use_ai, ai_style))
+            task = asyncio.create_task(
+                monitor_single_video(bvid, template, interval, use_ai, ai_style)
+            )
             tasks.append(task)
 
         self.tasks = tasks
-        logger.info(f"\n共监控 {len(tasks)} 个视频\n")
+        logger.info(f"共监控 {len(tasks)} 个视频")
 
         # 如果有UP主UID，启动视频发现任务
         if self.uploader_uid:
             discovery_task = asyncio.create_task(self._video_discovery_loop())
             tasks.append(discovery_task)
-            logger.info(f"已启动视频自动发现功能（UP主UID: {self.uploader_uid}）\n")
+            logger.info(f"已启动视频自动发现功能（UP主UID: {self.uploader_uid}）")
 
         # 启动任务清理任务
         cleanup_task = asyncio.create_task(self._cleanup_completed_tasks())
@@ -239,11 +266,25 @@ async def main():
 
     # 将 config.yaml 中残留的 videos 导入数据库并清空 YAML
     imported = config_manager.migrate_seed_videos_to_db()
+
+    # 若监控表为空，尝试从 discovered_videos 回填
+    app_defaults = config_manager.get_app_config()
+    if monitored_video_manager.count(enabled_only=False) == 0:
+        backfilled = monitored_video_manager.backfill_from_discovered(
+            template="@{username} 感谢你的评论！",
+            interval=app_defaults.get('default_check_interval', 60),
+            use_ai=True,
+            ai_style=app_defaults.get('default_ai_style', 'humorous'),
+            uid=str(app_defaults['uploader_uid']) if app_defaults.get('uploader_uid') else None,
+        )
+        if backfilled:
+            logger.info(f"已从 discovered_videos 回填监控视频 {backfilled} 个")
+
     video_count = monitored_video_manager.count()
     if imported:
         logger.info(f"启动迁移完成：数据库中现有监控视频 {video_count} 个")
     else:
-        logger.info(f"当前监控视频数: {video_count}")
+        logger.info(f"当前数据库监控视频数: {video_count} (来源: monitored_videos 表)")
 
     if video_count == 0 and not app_config.get('uploader_uid'):
         logger.warning(
