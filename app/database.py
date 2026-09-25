@@ -156,7 +156,10 @@ class DatabaseManager:
         """检查评论是否已回复"""
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT 1 FROM replied_comments WHERE bvid = ? AND rpid = ?', (bvid, rpid))
+        cursor.execute(
+            'SELECT 1 FROM replied_comments WHERE bvid = ? AND rpid = ?',
+            (bvid, str(rpid))
+        )
         result = cursor.fetchone()
         cursor.close()
         return result is not None
@@ -169,6 +172,7 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
         try:
+            rpid = str(rpid)
             logger.debug(f"标记评论已回复: BVID={bvid}, RPID={rpid}, 用户={username}")
             cursor.execute('''
                 INSERT OR REPLACE INTO replied_comments (bvid, rpid, username, message, mid, user_comment_time, ai_reply, replied_at)

@@ -99,8 +99,14 @@ app:
   # UP主 UID：填写后会自动发现该 UP 的新投稿并加入监控
   # 留空则仅监控下方 videos 列表
   uploader_uid: ''
-  # 自动发现新视频的检查间隔（秒），建议 >= 300，过短易触发风控
-  video_discovery_interval: 600
+  # 自动发现新视频的检查间隔（秒）：启动 60 秒后首次检查，之后按此间隔
+  # 建议 3600（1 小时），过短易触发风控
+  video_discovery_interval: 3600
+  # 日常增量会按时间倒序翻页，直到碰到库里已有的视频（不限 10 条）
+  # 下列窗口参数仅作兼容保留；空库/监控过少时仍会全量同步
+  video_discovery_latest_count: 10
+  # 设为 true 可强制每次启动全量同步（同步完建议改回 false）
+  video_full_sync_on_start: false
   # 新发现视频默认使用的 AI 风格（需在 ai_reply_styles 中存在）
   default_ai_style: natural
 

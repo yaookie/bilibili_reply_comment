@@ -15,9 +15,11 @@ class AutoReplyService:
     def __init__(self):
         self.running = False
         self.tasks = []
+        self._monitored_bvids = set()  # 防止同一视频重复创建监控任务
         self.uploader_uid = None
-        self.video_discovery_interval = 300  # 默认5分钟检查一次新视频
+        self.video_discovery_interval = 3600  # 默认1小时检查一次新视频
         self._task_cleanup_interval = 3600  # 每小时清理一次已完成的任务
+        self._last_config_check = 0.0
 
     def start(self):
         """启动服务：从数据库加载监控视频并创建任务"""
@@ -33,7 +35,7 @@ class AutoReplyService:
 
         # 获取UP主UID配置（可选）
         self.uploader_uid = app_config.get('uploader_uid')
-        self.video_discovery_interval = app_config.get('video_discovery_interval', 300)
+        self.video_discovery_interval = app_config.get('video_discovery_interval', 3600)
 
         # 监控列表只从数据库读取（不再依赖 config.yaml 的 videos）
         if monitored_video_manager.count(enabled_only=False) == 0:
@@ -82,10 +84,14 @@ class AutoReplyService:
                 logger.warning(f"跳过无效的视频配置: {config}")
                 continue
 
+            if bvid in self._monitored_bvids:
+                continue
+
             task = asyncio.create_task(
                 monitor_single_video(bvid, template, interval, use_ai, ai_style)
             )
             tasks.append(task)
+            self._monitored_bvids.add(bvid)
 
         self.tasks = tasks
         logger.info(f"共监控 {len(tasks)} 个视频")
@@ -102,7 +108,7 @@ class AutoReplyService:
 
     async def _video_discovery_loop(self):
         """视频发现循环：首次延迟 60 秒，之后按配置间隔检查"""
-        interval = max(60, int(self.video_discovery_interval or 300))
+        interval = max(60, int(self.video_discovery_interval or 3600))
         logger.info(
             f"视频发现任务已启动（首次 60 秒后检查，之后每 {interval} 秒检查一次）"
         )
@@ -117,9 +123,12 @@ class AutoReplyService:
 
         while self.running:
             try:
+                # 发现循环顺带做配置热加载（比每个视频任务都检查更轻量）
+                ConfigManager().check_and_reload()
+
                 logger.debug("执行视频发现检查")
 
-                # 执行视频发现 - 启用自动保存到配置文件
+                # 执行视频发现（写入数据库）
                 new_videos = await discover_and_add_new_videos(
                     self.uploader_uid,
                     auto_save=True
@@ -162,6 +171,10 @@ class AutoReplyService:
 
         for bvid in new_bvids:
             try:
+                if bvid in self._monitored_bvids:
+                    logger.debug(f"视频已在监控中，跳过: {bvid}")
+                    continue
+
                 video_config = monitored_video_manager.get_video(bvid)
 
                 if video_config:
@@ -182,6 +195,7 @@ class AutoReplyService:
                     monitor_single_video(bvid, template, interval, use_ai, ai_style)
                 )
                 self.tasks.append(task)
+                self._monitored_bvids.add(bvid)
 
                 logger.info(f"✓ 已开始监控新视频: {title} ({bvid}) [风格: {ai_style}]")
             except Exception as e:
@@ -279,6 +293,28 @@ async def main():
         )
         if backfilled:
             logger.info(f"已从 discovered_videos 回填监控视频 {backfilled} 个")
+
+    # 空库或手动强制：启动前全量同步
+    # 若监控数 ≤ 增量窗口，多半是历史「只拉最新 N 条」遗留，补一次全量
+    latest_count = int(app_config.get('video_discovery_latest_count', 10) or 10)
+    force_full = bool(app_config.get('video_full_sync_on_start', False))
+    monitored_now = monitored_video_manager.count(enabled_only=False)
+    need_full_sync = bool(app_config.get('uploader_uid')) and (
+        force_full or monitored_now == 0 or monitored_now <= latest_count
+    )
+    if need_full_sync:
+        logger.info(
+            f"准备全量同步 UP 主投稿（当前监控 {monitored_now} 个，"
+            f"force={force_full}, 窗口={latest_count}）…"
+        )
+        try:
+            synced = await discover_and_add_new_videos(
+                str(app_config['uploader_uid']),
+                force_full_sync=True,
+            )
+            logger.info(f"启动前全量同步完成，新增 {len(synced)} 个视频")
+        except Exception as e:
+            logger.error(f"启动前全量同步失败: {e}", exc_info=True)
 
     video_count = monitored_video_manager.count()
     if imported:

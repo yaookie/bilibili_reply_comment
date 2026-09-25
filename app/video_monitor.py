@@ -41,7 +41,10 @@ async def get_new_comments(bvid: str) -> list:
             if not replies:
                 break
 
-            new_replies = [r for r in replies if not reply_record_manager.is_replied(bvid, r['rpid'])]
+            new_replies = [
+                r for r in replies
+                if not reply_record_manager.is_replied(bvid, str(r['rpid']))
+            ]
             comments.extend(new_replies)
 
             is_end = cursor.get("is_end", True)
@@ -57,85 +60,163 @@ async def get_new_comments(bvid: str) -> list:
     return comments
 
 
-async def get_uploader_latest_videos(uid: str, count: int = 5) -> List[Dict]:
-    """获取UP主的最新投稿视频
+async def get_uploader_videos(
+    uid: str,
+    count: int = 10,
+    full_sync: bool = False,
+    stop_at_known: set = None,
+) -> List[Dict]:
+    """获取UP主投稿视频
 
     Args:
         uid: UP主UID
-        count: 获取数量
+        count: 仅在既非全量、也未提供 stop_at_known 时，取最新 N 条
+        full_sync: True 时分页拉取全部投稿（首次空库用）
+        stop_at_known: 增量模式——按时间倒序翻页，遇到已在集合中的 bvid 即停止
+                       （可覆盖一次更新远超 N 条的情况）
 
     Returns:
-        视频信息列表，包含bvid、title等
+        视频信息列表，包含 bvid、title（增量时一般为「尚未入库」的新视频）
     """
     max_retries = 3
     retry_delay = 5
+    page_size = 50
+    if not full_sync and not stop_at_known:
+        page_size = max(1, min(int(count), 50))
+
+    known = stop_at_known or set()
 
     for attempt in range(max_retries):
         try:
             u = user.User(uid=int(uid))
-            videos = await u.get_videos(pn=1, ps=count)
-
             result = []
-            vlist = videos.get('list', {}).get('vlist', [])
-            # 获取UP主用户名
-            # uname = videos.get('list')['vlist'][0]['author'] if videos.get('list', {}).get('tlist') else ''
+            pn = 1
+            if full_sync:
+                max_pages = 200
+            elif stop_at_known is not None:
+                # 增量翻页直到碰到已知视频；上限防止异常情况下打爆接口
+                max_pages = 50
+            else:
+                max_pages = 1
 
-            for v in vlist:
-                result.append({
-                    'bvid': v['bvid'],
-                    # 'uname': uname,
-                    'title': v['title']
-                })
+            hit_known = False
+            while pn <= max_pages:
+                videos = await u.get_videos(pn=pn, ps=page_size)
+                vlist = videos.get('list', {}).get('vlist', [])
+                if not vlist:
+                    break
 
-            logger.info(f"获取到UP主 {uid} 的 {len(result)} 个最新视频")
+                for v in vlist:
+                    bvid = v['bvid']
+                    if stop_at_known is not None and bvid in known:
+                        # 投稿列表按时间倒序：碰到已同步过的，后面更旧的都应已在库中
+                        hit_known = True
+                        break
+
+                    result.append({
+                        'bvid': bvid,
+                        'title': v['title'],
+                    })
+                    if not full_sync and stop_at_known is None and len(result) >= count:
+                        break
+
+                if hit_known:
+                    break
+                if not full_sync and stop_at_known is None:
+                    break
+                if len(vlist) < page_size:
+                    break
+
+                pn += 1
+                await asyncio.sleep(1.0)
+
+            if full_sync:
+                mode = "全量"
+            elif stop_at_known is not None:
+                mode = f"增量(遇已知即停, 翻页{pn})"
+            else:
+                mode = "增量(固定窗口)"
+            logger.info(f"获取到UP主 {uid} 的 {len(result)} 个投稿（{mode}）")
+            if not full_sync and stop_at_known is None:
+                return result[:count]
             return result
 
         except Exception as e:
             error_msg = str(e)
 
-            # 检查是否是 412 风控错误
             if '412' in error_msg:
                 if attempt < max_retries - 1:
                     wait_time = retry_delay * (attempt + 1)
                     logger.warning(f"触发B站风控(412)，{wait_time}秒后重试 ({attempt + 1}/{max_retries})...")
                     await asyncio.sleep(wait_time)
                     continue
-                else:
-                    logger.error(
-                        f"触发B站风控(412)，已重试{max_retries}次仍失败。建议：1)降低检查频率 2)检查Cookie是否有效 3)稍后再试")
-                    return []
-            else:
-                logger.error(f"获取UP主 {uid} 视频失败: {e}")
+                logger.error(
+                    f"触发B站风控(412)，已重试{max_retries}次仍失败。"
+                    f"建议：1)降低检查频率 2)检查Cookie是否有效 3)稍后再试"
+                )
                 return []
+
+            logger.error(f"获取UP主 {uid} 视频失败: {e}")
+            return []
 
     return []
 
 
-async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False) -> List[str]:
+async def get_uploader_latest_videos(uid: str, count: int = 5) -> List[Dict]:
+    """获取UP主的最新投稿视频（兼容旧调用）"""
+    return await get_uploader_videos(uid, count=count, full_sync=False)
+
+
+async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False,
+                                     force_full_sync: bool = False) -> List[str]:
     """发现并添加UP主的新视频到监控列表（写入 SQLite）
 
     Args:
         uploader_uid: UP主UID
         auto_save: 兼容旧参数，已无实际作用（视频直接落库）
+        force_full_sync: 强制全量同步全部投稿
 
     Returns:
         新添加的视频BVID列表
     """
+    from .database import monitored_video_manager, database_manager
+
     logger.info(f"开始检查UP主 {uploader_uid} 的新视频...")
 
-    # 获取最新视频
-    latest_videos = await get_uploader_latest_videos(uploader_uid, count=10)
+    config_manager = ConfigManager()
+    app_config = config_manager.get_app_config()
+    default_ai_style = app_config.get('default_ai_style', 'humorous')
+
+    discovered_count = video_discovery_manager.get_discovered_count(str(uploader_uid))
+    monitored_count = monitored_video_manager.count(enabled_only=False)
+    full_sync = force_full_sync or discovered_count == 0 or monitored_count == 0
+
+    if full_sync:
+        logger.info(
+            f"执行全量同步（discovered={discovered_count}, monitored={monitored_count}），"
+            f"将分页拉取该 UP 的全部投稿…"
+        )
+        latest_videos = await get_uploader_videos(uploader_uid, full_sync=True)
+    else:
+        # 增量：倒序翻页直到碰到库里已有的视频，避免一次更新超过固定窗口时漏稿
+        known = {
+            item['bvid']
+            for item in database_manager.list_discovered_videos(uid=str(uploader_uid))
+        }
+        # 监控表里有、发现表暂无的也视为已知，防止重复拉入判断异常
+        for v in monitored_video_manager.list_videos(enabled_only=False):
+            known.add(v['bvid'])
+
+        logger.info(f"执行增量同步（已知 {len(known)} 个，遇已知 bvid 即停止翻页）")
+        latest_videos = await get_uploader_videos(
+            uploader_uid, full_sync=False, stop_at_known=known
+        )
 
     if not latest_videos:
-        logger.warning("未获取到视频列表")
+        logger.debug("未获取到新视频列表（可能没有更新）")
         return []
 
     new_added = []
-    config_manager = ConfigManager()
-
-    # 获取默认的AI风格
-    app_config = config_manager.get_app_config()
-    default_ai_style = app_config.get('default_ai_style', 'humorous')
 
     for vid in latest_videos:
         bvid = vid['bvid']
@@ -143,8 +224,15 @@ async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False
 
         # 检查是否已发现过
         if video_discovery_manager.is_discovered(uploader_uid, bvid):
-            # 已发现的视频改为 DEBUG 级别，减少重复日志噪音
-            logger.debug(f"视频已发现: {title} ({bvid})")
+            # 已发现但仍可能不在监控表（例如只同步了 discovered）
+            if not monitored_video_manager.is_monitored(bvid):
+                if config_manager.add_video_to_config(
+                    bvid, use_ai=True, ai_style=default_ai_style, title=title
+                ):
+                    new_added.append(bvid)
+                    logger.info(f"✓ 已补入监控: {title} ({bvid}) [风格: {default_ai_style}]")
+            else:
+                logger.debug(f"视频已发现: {title} ({bvid})")
             continue
 
         # 标记为已发现
@@ -156,7 +244,7 @@ async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False
             logger.info(f"✓ 新视频已添加监控: {title} ({bvid}) [风格: {default_ai_style}]")
 
     if new_added:
-        logger.info(f"共发现 {len(new_added)} 个新视频")
+        logger.info(f"共发现/补入 {len(new_added)} 个视频")
     else:
         logger.debug("未发现新视频")
 
@@ -244,7 +332,11 @@ async def reply_to_new_comments(bvid: str, reply_template: str = "感谢评论�
         if use_ai:
             style_tag = f"[{ai_style or 'default'}]"
             logger.debug(f"[{idx}/{len(new_comments)}] {style_tag} 处理评论 @{username}: {message[:50]}{'...' if len(message) > 50 else ''}")
-            reply_message = generate_humorous_reply(video_title, video_desc, video_url, username, message, ai_style)
+            # 同步 HTTP 调用放到线程池，避免阻塞整条事件循环
+            reply_message = await asyncio.to_thread(
+                generate_humorous_reply,
+                video_title, video_desc, video_url, username, message, ai_style,
+            )
             logger.debug(f"[{idx}/{len(new_comments)}] {style_tag} AI回复: {reply_message[:50]}{'...' if len(reply_message) > 50 else ''}")
         else:
             logger.debug(f"[{idx}/{len(new_comments)}] 处理评论 @{username}: {message[:50]}{'...' if len(message) > 50 else ''}")
@@ -258,7 +350,7 @@ async def reply_to_new_comments(bvid: str, reply_template: str = "感谢评论�
             user_comment_time = datetime.fromtimestamp(cmt.get('ctime', 0)).strftime('%Y-%m-%d %H:%M:%S')
             reply_record_manager.mark_replied_with_details(
                 bvid,
-                cmt['rpid'],
+                str(cmt['rpid']),
                 username=username,
                 message=message,
                 mid=user_mid,
@@ -302,9 +394,7 @@ async def monitor_single_video(bvid: str, reply_template: str, interval: int,
 
     while True:
         try:
-            # 每次循环前检查配置是否有变化
-            ConfigManager().check_and_reload()
-
+            # 配置热加载由发现循环/低频检查即可，避免上百个监控任务同时刷磁盘
             await reply_to_new_comments(bvid, reply_template, use_ai, ai_style)
         except asyncio.CancelledError:
             logger.info(f"监控任务已取消: {bvid}")

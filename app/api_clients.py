@@ -21,7 +21,11 @@ class CredentialManager:
             cred_config = ConfigManager().get_bilibili_credential() or {}
 
             required = ['sessdata', 'bili_jct', 'buvid3', 'dedeuserid']
-            missing = [k for k in required if not cred_config.get(k)]
+            missing = []
+            for k in required:
+                val = cred_config.get(k)
+                if not val or str(val).startswith('请填写'):
+                    missing.append(k)
             if missing:
                 raise ValueError(
                     f"B站凭证缺少必填项: {', '.join(missing)}。"

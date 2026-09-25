@@ -129,7 +129,7 @@ python bilibili_auto_reply.py
 | `log_dir` | 日志目录 | `logs` |
 | `record_dir` | 数据目录 | `data` |
 | `uploader_uid` | UP 主 UID，开启自动发现 | 你的 UID，不需要可留空 |
-| `video_discovery_interval` | 发现新视频间隔（秒） | `>= 300`，过短易风控 |
+| `video_discovery_interval` | 发现新视频间隔（秒） | 建议 `3600`（1 小时） |
 | `default_ai_style` | 新视频默认 AI 风格 | 如 `natural` |
 
 ### `videos` 种子列表（可选）
