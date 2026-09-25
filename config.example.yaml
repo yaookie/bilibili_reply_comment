@@ -1,0 +1,124 @@
+# ============================================================
+# B站自动回复机器人 - 配置模板
+# 使用方法：
+#   1. 复制本文件为 config.yaml
+#   2. 填写下方凭证与业务配置
+#   3. 运行 start.sh / start.bat 或 python bilibili_auto_reply.py
+# ============================================================
+
+# ---------- B站登录凭证（必填）----------
+# 获取方式：浏览器登录 bilibili.com → F12 → Application/存储 → Cookies
+# 需要复制的字段：
+#   SESSDATA、bili_jct、buvid3、DedeUserID、ac_time_value（可选）
+bilibili:
+  credential:
+    sessdata: 请填写SESSDATA
+    bili_jct: 请填写bili_jct          # 发送评论必需
+    buvid3: 请填写buvid3
+    dedeuserid: '请填写DedeUserID'     # 你的 UID
+    ac_time_value: 请填写ac_time_value # Cookie 刷新用，可选但建议填写
+
+# ---------- 通义千问 / DashScope（AI 回复时必填）----------
+qwen:
+  api_key: 请填写API_KEY
+  base_url: https://dashscope.aliyuncs.com/api/v2/apps/protocols/compatible-mode/v1
+  model: qwen3.8-omni-flash
+
+# ---------- AI 回复风格 ----------
+# 提示词中可使用占位符：
+#   {video_title} {video_url} {video_desc}
+#   {comment_username} {comment_message}
+ai_reply_styles:
+  natural:
+    name: 自然回复
+    prompt: |
+      你是B站UP主本人。
+      根据视频内容和用户评论，生成一条真实自然的评论回复。
+      规则：只输出最终回复，不要解释，不要加引号，50字以内。
+      视频标题：{video_title}
+      视频链接：{video_url}
+      视频简介：{video_desc}
+      用户名称：{comment_username}
+      用户评论：{comment_message}
+      现在直接输出回复内容。
+
+  humorous:
+    name: 幽默风趣
+    prompt: |
+      你是一个B站UP主，擅长用幽默风趣的方式与观众互动。
+      视频标题：{video_title}
+      视频链接：{video_url}
+      视频简介：{video_desc}
+      用户：{comment_username}
+      评论：{comment_message}
+      要求：幽默友好，50字以内，直接输出回复。
+
+  sharp:
+    name: 毒舌犀利
+    prompt: |
+      你是一个B站UP主，说话犀利有个性，但不恶意攻击。
+      视频标题：{video_title}
+      视频链接：{video_url}
+      视频简介：{video_desc}
+      用户：{comment_username}
+      评论：{comment_message}
+      要求：犀利有趣，50字以内，直接输出回复。
+
+  warm:
+    name: 温暖治愈
+    prompt: |
+      你是一个B站UP主，性格温暖、善解人意。
+      视频标题：{video_title}
+      视频链接：{video_url}
+      视频简介：{video_desc}
+      用户：{comment_username}
+      评论：{comment_message}
+      要求：温暖真诚，50字以内，直接输出回复。
+
+  professional:
+    name: 专业认真
+    prompt: |
+      你是一个B站UP主，专业严谨、认真负责。
+      视频标题：{video_title}
+      视频链接：{video_url}
+      视频简介：{video_desc}
+      用户：{comment_username}
+      评论：{comment_message}
+      要求：专业清晰，80字以内，直接输出回复。
+
+# ---------- 应用配置 ----------
+app:
+  # 默认评论检查间隔（秒），单个视频可覆盖
+  default_check_interval: 60
+  # 日志级别：DEBUG / INFO / WARNING / ERROR
+  log_level: INFO
+  # 日志目录（自动创建）
+  log_dir: logs
+  # 数据库等数据目录（自动创建）
+  record_dir: data
+  # UP主 UID：填写后会自动发现该 UP 的新投稿并加入监控
+  # 留空则仅监控下方 videos 列表
+  uploader_uid: ''
+  # 自动发现新视频的检查间隔（秒），建议 >= 300，过短易触发风控
+  video_discovery_interval: 600
+  # 新发现视频默认使用的 AI 风格（需在 ai_reply_styles 中存在）
+  default_ai_style: natural
+
+# ---------- 手动监控视频列表 ----------
+# 可不填：若配置了 uploader_uid，程序会自动发现并追加
+# 也可手动指定需要长期监控的视频
+videos:
+  # 示例 1：AI 回复
+  - bvid: BV1xxxxxxxx
+    title: 示例视频标题
+    template: '@{username} 感谢你的评论！'
+    interval: 60
+    use_ai: true
+    ai_style: natural
+
+  # 示例 2：固定模板回复（不调用 AI）
+  # - bvid: BV1yyyyyyyy
+  #   title: 另一个视频
+  #   template: '@{username} 谢谢支持！'
+  #   interval: 120
+  #   use_ai: false
