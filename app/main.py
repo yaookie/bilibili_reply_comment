@@ -4,7 +4,7 @@ import signal
 import sys
 from pathlib import Path
 from .config import ConfigManager
-from .database import database_manager, reply_record_manager, video_discovery_manager
+from .database import database_manager, reply_record_manager, video_discovery_manager, monitored_video_manager
 from .video_monitor import discover_and_add_new_videos, monitor_single_video
 from .logger import logger, setup_logger
 
@@ -135,16 +135,8 @@ class AutoReplyService:
 
         for bvid in new_bvids:
             try:
-                # 从配置中获取该视频的配置（已经由 discover_and_add_new_videos 添加）
-                videos_config = ConfigManager().get_videos_config()
-                video_config = None
+                video_config = monitored_video_manager.get_video(bvid)
 
-                for vc in videos_config:
-                    if isinstance(vc, dict) and vc.get('bvid') == bvid:
-                        video_config = vc
-                        break
-
-                # 提取配置，如果找不到则使用默认值
                 if video_config:
                     template = video_config.get('template', "@{username} 感谢你的评论！")
                     interval = video_config.get('interval', default_interval)
@@ -159,7 +151,6 @@ class AutoReplyService:
                     ai_style = default_ai_style
                     title = '未知标题'
 
-                # 创建新的监控任务
                 task = asyncio.create_task(
                     monitor_single_video(bvid, template, interval, use_ai, ai_style)
                 )
@@ -241,12 +232,25 @@ async def main():
     # 初始化数据库管理器
     database_manager.initialize()
 
-    # 迁移JSON数据到SQLite（如果存在）
-    # migrate_json_to_sqlite()
-
     # 初始化各个管理器
     reply_record_manager.initialize()
     video_discovery_manager.initialize()
+    monitored_video_manager.initialize()
+
+    # 将 config.yaml 中残留的 videos 导入数据库并清空 YAML
+    imported = config_manager.migrate_seed_videos_to_db()
+    video_count = monitored_video_manager.count()
+    if imported:
+        logger.info(f"启动迁移完成：数据库中现有监控视频 {video_count} 个")
+    else:
+        logger.info(f"当前监控视频数: {video_count}")
+
+    if video_count == 0 and not app_config.get('uploader_uid'):
+        logger.warning(
+            "数据库中无监控视频，且未配置 uploader_uid。"
+            "可在 config.yaml 的 videos 中临时添加种子条目（启动后会自动导入），"
+            "或设置 uploader_uid 启用自动发现。"
+        )
 
     # Windows 下注册信号处理
     try:

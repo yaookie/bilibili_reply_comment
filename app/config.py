@@ -90,8 +90,8 @@ class ConfigManager:
         uploader_uid = self._config.get('app', {}).get('uploader_uid')
         if not videos and not uploader_uid:
             logger.warning(
-                "未配置 videos 列表，也未设置 app.uploader_uid。"
-                "请至少配置其一，否则程序无可监控视频。"
+                "未在 config.yaml 配置 videos 种子列表，也未设置 app.uploader_uid。"
+                "若数据库中也无监控视频，程序将无可监控目标。"
             )
 
     def _get_default_ai_styles(self):
@@ -169,10 +169,10 @@ class ConfigManager:
             if current_modified > self._last_modified:
                 from .logger import logger
                 logger.info("检测到配置文件变化，正在重新加载...")
-                old_videos_count = len(self._config.get('videos', []))
                 self._load_config()
-                new_videos_count = len(self._config.get('videos', []))
-                logger.info(f"配置已重新加载 (视频数: {old_videos_count} -> {new_videos_count})")
+                # 若 YAML 里临时写了 videos 种子，导入数据库
+                imported = self.migrate_seed_videos_to_db()
+                logger.info(f"配置已重新加载（本次导入种子视频: {imported}）")
                 return True
         return False
 
@@ -195,12 +195,9 @@ class ConfigManager:
         return self.config.get('qwen', {})
 
     def get_videos_config(self) -> List[Dict]:
-        """获取视频配置列表"""
-        videos = self.config.get('videos', [])
-        # 确保返回值是列表，而不是 None
-        if videos is None:
-            return []
-        return videos
+        """获取监控视频列表（来自 SQLite，不再依赖 YAML 长列表）"""
+        from .database import monitored_video_manager
+        return monitored_video_manager.list_videos(enabled_only=True)
 
     def get_app_config(self) -> Dict:
         return self.config.get('app', {})
@@ -245,16 +242,14 @@ class ConfigManager:
     def add_video_to_config(self, bvid: str, template: str = None,
                             interval: int = None, use_ai: bool = True,
                             ai_style: str = None, title: str = None) -> bool:
-        """动态添加视频到配置（内存中）
+        """添加监控视频到数据库
 
-        Args:
-            bvid: 视频BV号
-            template: 回复模板
-            interval: 检查间隔
-            use_ai: 是否使用AI
-            ai_style: AI风格
-            title: 视频标题（可选）
+        Returns:
+            True 表示新添加；False 表示已存在
         """
+        from .database import monitored_video_manager
+        from .logger import logger
+
         app_config = self.get_app_config()
         if template is None:
             template = "@{username} 感谢你的评论！"
@@ -263,46 +258,102 @@ class ConfigManager:
         if ai_style is None:
             ai_style = app_config.get('default_ai_style', 'humorous')
 
-        videos = self._config.get('videos', [])
+        if monitored_video_manager.is_monitored(bvid):
+            logger.info(f"视频 {bvid} 已在监控列表中")
+            return False
 
-        # 检查是否已存在
-        for v in videos:
-            if isinstance(v, dict) and v.get('bvid') == bvid:
-                from .logger import logger
-                logger.info(f"视频 {bvid} 已在监控列表中")
-                return False
-
-        # 添加新视频
-        new_video = {
-            'bvid': bvid,
-            'title': title,  # 保存视频标题
-            'template': template,
-            'interval': interval,
-            'use_ai': use_ai,
-            'ai_style': ai_style
-        }
-        videos.append(new_video)
-        self._config['videos'] = videos
-
+        inserted = monitored_video_manager.add_or_update(
+            bvid=bvid,
+            title=title,
+            template=template,
+            interval=interval,
+            use_ai=use_ai,
+            ai_style=ai_style,
+            enabled=True,
+        )
         title_info = f" - {title}" if title else ""
-        from .logger import logger
         logger.info(f"已添加新视频到监控列表: {bvid}{title_info} [风格: {ai_style}]")
-        return True
+        return inserted
+
+    def migrate_seed_videos_to_db(self) -> int:
+        """将 config.yaml 中的 videos 种子导入 SQLite，随后清空 YAML 中的 videos。
+
+        Returns:
+            新导入（此前不存在）的视频数量
+        """
+        from .database import monitored_video_manager, video_discovery_manager
+        from .logger import logger
+
+        seed_videos = self._config.get('videos') or []
+        if not seed_videos:
+            return 0
+
+        app_config = self.get_app_config()
+        default_interval = app_config.get('default_check_interval', 60)
+        default_ai_style = app_config.get('default_ai_style', 'humorous')
+        uploader_uid = app_config.get('uploader_uid')
+
+        imported = 0
+        for item in seed_videos:
+            if isinstance(item, str):
+                bvid = item
+                title = None
+                template = "@{username} 感谢你的评论！"
+                interval = default_interval
+                use_ai = False
+                ai_style = None
+            elif isinstance(item, dict) and item.get('bvid'):
+                bvid = item['bvid']
+                title = item.get('title')
+                template = item.get('template', "@{username} 感谢你的评论！")
+                interval = item.get('interval', default_interval)
+                use_ai = item.get('use_ai', True)
+                ai_style = item.get('ai_style', default_ai_style if use_ai else None)
+            else:
+                logger.warning(f"跳过无效的种子视频配置: {item}")
+                continue
+
+            was_new = not monitored_video_manager.is_monitored(bvid)
+            monitored_video_manager.add_or_update(
+                bvid=bvid,
+                title=title,
+                template=template,
+                interval=interval,
+                use_ai=use_ai,
+                ai_style=ai_style,
+                enabled=True,
+            )
+            if was_new:
+                imported += 1
+
+            # 同步标记为已发现，避免自动发现再次当成新视频
+            if uploader_uid:
+                video_discovery_manager.mark_discovered(str(uploader_uid), bvid, title)
+
+        # 清空 YAML 中的长列表，避免配置文件继续膨胀
+        self._config['videos'] = []
+        self.save_config_to_file()
+        logger.info(
+            f"已将 config.yaml 中的 {len(seed_videos)} 条视频导入数据库"
+            f"（新增 {imported}），并清空 YAML 中的 videos 列表"
+        )
+        return imported
 
     def save_config_to_file(self):
-        """保存配置到文件"""
+        """保存配置到文件（不写监控视频长列表，videos 固定为空数组）"""
         try:
-            # 自定义 YAML 输出格式，增加可读性
             import io
+            from .logger import logger
 
-            # 使用 StringIO 捕获输出
+            # 确保不会把数据库中的视频写回 YAML
+            config_to_save = dict(self._config)
+            config_to_save['videos'] = []
+
             output = io.StringIO()
 
-            # 自定义 Dumper 来改善格式
             class CustomDumper(yaml.SafeDumper):
                 pass
 
-            # 为字符串添加引号处理
             def str_representer(dumper, data):
                 if '\n' in data or len(data) > 80:
                     return dumper.represent_scalar('tag:yaml.org,2002:str', data, style='|')
@@ -310,23 +361,29 @@ class ConfigManager:
 
             CustomDumper.add_representer(str, str_representer)
 
+            # 只读文件需先放开写权限
+            if self._config_path.exists() and not os.access(self._config_path, os.W_OK):
+                try:
+                    os.chmod(self._config_path, 0o644)
+                except OSError:
+                    pass
+
             yaml.dump(
-                self._config,
+                config_to_save,
                 output,
                 allow_unicode=True,
                 default_flow_style=False,
                 sort_keys=False,
-                indent=2,  # 缩进2空格
-                width=120,  # 每行最大宽度
+                indent=2,
+                width=120,
                 Dumper=CustomDumper
             )
 
-            # 写入文件
             with open(self._config_path, 'w', encoding='utf-8') as f:
                 f.write(output.getvalue())
 
             self._last_modified = self._config_path.stat().st_mtime
-            from .logger import logger
+            self._config['videos'] = []
             logger.info("配置已保存到文件")
         except Exception as e:
             from .logger import logger

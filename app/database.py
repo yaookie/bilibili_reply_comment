@@ -117,6 +117,25 @@ class DatabaseManager:
             except Exception as e:
                 logger.error(f"添加 discovered_at 字段失败: {e}")
 
+        # 监控视频表（替代 config.yaml 中臃肿的 videos 列表）
+        cursor.execute('''
+                       CREATE TABLE IF NOT EXISTS monitored_videos
+                       (
+                           bvid       TEXT PRIMARY KEY,
+                           title      TEXT,
+                           template   TEXT,
+                           interval   INTEGER,
+                           use_ai     INTEGER DEFAULT 1,
+                           ai_style   TEXT,
+                           enabled    INTEGER DEFAULT 1,
+                           created_at TIMESTAMP,
+                           updated_at TIMESTAMP
+                       )
+                       ''')
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_monitored_videos_enabled ON monitored_videos(enabled)'
+        )
+
         # 创建索引以提高查询性能
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_replied_comments_bvid ON replied_comments(bvid)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_replied_comments_rpid ON replied_comments(rpid)')
@@ -204,6 +223,137 @@ class DatabaseManager:
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute('SELECT COUNT(*) FROM discovered_videos WHERE uid = ?', (uid,))
+        count = cursor.fetchone()[0]
+        cursor.close()
+        return count
+
+    # ---------- 监控视频 ----------
+    def list_monitored_videos(self, enabled_only: bool = True) -> list:
+        """获取监控视频列表"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        if enabled_only:
+            cursor.execute(
+                '''SELECT bvid, title, template, interval, use_ai, ai_style, enabled
+                   FROM monitored_videos WHERE enabled = 1 ORDER BY created_at ASC, bvid ASC'''
+            )
+        else:
+            cursor.execute(
+                '''SELECT bvid, title, template, interval, use_ai, ai_style, enabled
+                   FROM monitored_videos ORDER BY created_at ASC, bvid ASC'''
+            )
+        rows = cursor.fetchall()
+        cursor.close()
+        result = []
+        for bvid, title, template, interval, use_ai, ai_style, enabled in rows:
+            result.append({
+                'bvid': bvid,
+                'title': title,
+                'template': template,
+                'interval': interval,
+                'use_ai': bool(use_ai),
+                'ai_style': ai_style,
+                'enabled': bool(enabled),
+            })
+        return result
+
+    def get_monitored_video(self, bvid: str) -> dict | None:
+        """按 BV 号获取监控视频"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''SELECT bvid, title, template, interval, use_ai, ai_style, enabled
+               FROM monitored_videos WHERE bvid = ?''',
+            (bvid,)
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        bvid, title, template, interval, use_ai, ai_style, enabled = row
+        return {
+            'bvid': bvid,
+            'title': title,
+            'template': template,
+            'interval': interval,
+            'use_ai': bool(use_ai),
+            'ai_style': ai_style,
+            'enabled': bool(enabled),
+        }
+
+    def is_video_monitored(self, bvid: str) -> bool:
+        """检查视频是否已在监控列表"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT 1 FROM monitored_videos WHERE bvid = ?', (bvid,))
+        result = cursor.fetchone()
+        cursor.close()
+        return result is not None
+
+    def upsert_monitored_video(self, bvid: str, title: str = None, template: str = None,
+                               interval: int = None, use_ai: bool = True,
+                               ai_style: str = None, enabled: bool = True) -> bool:
+        """新增或更新监控视频。返回 True 表示新插入，False 表示已存在（已更新）。"""
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        exists = self.is_video_monitored(bvid)
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            if exists:
+                cursor.execute(
+                    '''UPDATE monitored_videos
+                       SET title = COALESCE(?, title),
+                           template = COALESCE(?, template),
+                           interval = COALESCE(?, interval),
+                           use_ai = ?,
+                           ai_style = COALESCE(?, ai_style),
+                           enabled = ?,
+                           updated_at = ?
+                       WHERE bvid = ?''',
+                    (
+                        title,
+                        template,
+                        interval,
+                        1 if use_ai else 0,
+                        ai_style,
+                        1 if enabled else 0,
+                        now,
+                        bvid,
+                    )
+                )
+            else:
+                cursor.execute(
+                    '''INSERT INTO monitored_videos
+                       (bvid, title, template, interval, use_ai, ai_style, enabled, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    (
+                        bvid,
+                        title,
+                        template,
+                        interval,
+                        1 if use_ai else 0,
+                        ai_style,
+                        1 if enabled else 0,
+                        now,
+                        now,
+                    )
+                )
+            conn.commit()
+            return not exists
+        except Exception as e:
+            logger.error(f"写入监控视频失败 {bvid}: {e}", exc_info=True)
+            return False
+        finally:
+            cursor.close()
+
+    def get_monitored_count(self, enabled_only: bool = True) -> int:
+        """获取监控视频数量"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        if enabled_only:
+            cursor.execute('SELECT COUNT(*) FROM monitored_videos WHERE enabled = 1')
+        else:
+            cursor.execute('SELECT COUNT(*) FROM monitored_videos')
         count = cursor.fetchone()[0]
         cursor.close()
         return count
@@ -330,3 +480,49 @@ class VideoDiscoveryManager:
 
 
 video_discovery_manager = VideoDiscoveryManager()
+
+
+class MonitoredVideoManager:
+    """监控视频管理器 - 视频列表持久化到 SQLite，避免 config.yaml 膨胀"""
+
+    def __init__(self):
+        self._initialized = False
+
+    def initialize(self):
+        if self._initialized:
+            return
+        self._initialized = True
+
+    def list_videos(self, enabled_only: bool = True) -> list:
+        self.initialize()
+        return database_manager.list_monitored_videos(enabled_only=enabled_only)
+
+    def get_video(self, bvid: str):
+        self.initialize()
+        return database_manager.get_monitored_video(bvid)
+
+    def is_monitored(self, bvid: str) -> bool:
+        self.initialize()
+        return database_manager.is_video_monitored(bvid)
+
+    def add_or_update(self, bvid: str, title: str = None, template: str = None,
+                      interval: int = None, use_ai: bool = True,
+                      ai_style: str = None, enabled: bool = True) -> bool:
+        """添加监控视频。返回 True 表示新插入。"""
+        self.initialize()
+        return database_manager.upsert_monitored_video(
+            bvid=bvid,
+            title=title,
+            template=template,
+            interval=interval,
+            use_ai=use_ai,
+            ai_style=ai_style,
+            enabled=enabled,
+        )
+
+    def count(self, enabled_only: bool = True) -> int:
+        self.initialize()
+        return database_manager.get_monitored_count(enabled_only=enabled_only)
+
+
+monitored_video_manager = MonitoredVideoManager()

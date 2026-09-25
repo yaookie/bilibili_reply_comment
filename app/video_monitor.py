@@ -112,11 +112,11 @@ async def get_uploader_latest_videos(uid: str, count: int = 5) -> List[Dict]:
 
 
 async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False) -> List[str]:
-    """发现并添加UP主的新视频到监控列表
+    """发现并添加UP主的新视频到监控列表（写入 SQLite）
 
     Args:
         uploader_uid: UP主UID
-        auto_save: 是否自动保存到配置文件
+        auto_save: 兼容旧参数，已无实际作用（视频直接落库）
 
     Returns:
         新添加的视频BVID列表
@@ -150,19 +150,14 @@ async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False
         # 标记为已发现
         video_discovery_manager.mark_discovered(uid=uploader_uid, bvid=bvid, title=title)
 
-        # 添加到监控配置 - 使用默认风格
+        # 添加到监控数据库
         if config_manager.add_video_to_config(bvid, use_ai=True, ai_style=default_ai_style, title=title):
             new_added.append(bvid)
             logger.info(f"✓ 新视频已添加监控: {title} ({bvid}) [风格: {default_ai_style}]")
 
-    # 如果需要，保存配置到文件
-    if new_added and auto_save:
-        config_manager.save_config_to_file()
-
     if new_added:
         logger.info(f"共发现 {len(new_added)} 个新视频")
     else:
-        # 未发现新视频改为 DEBUG，避免每次检查都写入 INFO
         logger.debug("未发现新视频")
 
     return new_added

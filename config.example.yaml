@@ -104,21 +104,17 @@ app:
   # 新发现视频默认使用的 AI 风格（需在 ai_reply_styles 中存在）
   default_ai_style: natural
 
-# ---------- 手动监控视频列表 ----------
-# 可不填：若配置了 uploader_uid，程序会自动发现并追加
-# 也可手动指定需要长期监控的视频
-videos:
-  # 示例 1：AI 回复
-  - bvid: BV1xxxxxxxx
-    title: 示例视频标题
-    template: '@{username} 感谢你的评论！'
-    interval: 60
-    use_ai: true
-    ai_style: natural
-
-  # 示例 2：固定模板回复（不调用 AI）
-  # - bvid: BV1yyyyyyyy
-  #   title: 另一个视频
-  #   template: '@{username} 谢谢支持！'
-  #   interval: 120
-  #   use_ai: false
+# ---------- 手动监控视频（可选种子）----------
+# 监控列表默认保存在 data/bilibili_reply.db 的 monitored_videos 表中，
+# 避免视频增多后 config.yaml 变得臃肿。
+#
+# 如需手动添加少量视频：在下方临时填写，启动（或热重载）后会自动导入数据库，
+# 并清空本列表。日常请勿在此堆积大量条目。
+videos: []
+  # 示例：
+  # - bvid: BV1xxxxxxxx
+  #   title: 示例视频标题
+  #   template: '@{username} 感谢你的评论！'
+  #   interval: 60
+  #   use_ai: true
+  #   ai_style: natural

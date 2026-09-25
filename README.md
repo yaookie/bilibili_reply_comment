@@ -29,7 +29,7 @@ bilibili_reply_comment/
 │   ├── database.py          # SQLite 持久化
 │   └── logger.py            # 日志
 ├── data/                    # 运行数据（自动创建）
-│   └── bilibili_reply.db    # 回复记录与已发现视频
+│   └── bilibili_reply.db    # 回复记录、已发现视频、监控视频列表
 └── logs/                    # 日志目录（自动创建）
     └── bilibili_reply_comment.log
 ```
@@ -132,17 +132,28 @@ python bilibili_auto_reply.py
 | `video_discovery_interval` | 发现新视频间隔（秒） | `>= 300`，过短易风控 |
 | `default_ai_style` | 新视频默认 AI 风格 | 如 `natural` |
 
-### `videos` 视频列表
+### `videos` 种子列表（可选）
+
+监控视频**默认存放在 SQLite**（`data/bilibili_reply.db` → `monitored_videos` 表），不会写回 `config.yaml`，避免视频变多后配置文件臃肿。
+
+`config.yaml` 里的 `videos` 仅作为**一次性种子**：
+
+1. 在 YAML 中临时写上要监控的视频
+2. 启动或热重载后自动导入数据库
+3. YAML 中的 `videos` 会被清空为 `[]`
+
+日常增删改建议直接操作数据库，或再次往 `videos` 里写少量种子后重启。
 
 每项常用字段：
 
 ```yaml
-- bvid: BV1xxxxxxxx      # 视频 BV 号
-  title: 标题（可选，便于阅读）
-  template: '@{username} 感谢你的评论！'  # use_ai=false 时使用
-  interval: 60           # 该视频检查间隔（秒）
-  use_ai: true           # true=AI 回复，false=模板回复
-  ai_style: natural      # 对应 ai_reply_styles 中的 key
+videos:
+  - bvid: BV1xxxxxxxx
+    title: 标题（可选）
+    template: '@{username} 感谢你的评论！'  # use_ai=false 时使用
+    interval: 60
+    use_ai: true
+    ai_style: natural
 ```
 
 模板可用占位符：`{username}`、`{message}`。
@@ -177,10 +188,10 @@ export QWEN_API_KEY='sk-xxx'
 
 ## 工作流程简述
 
-1. 启动后为 `videos` 中每个视频创建监控任务
+1. 启动后将 `videos` 种子导入数据库，并为库中每个视频创建监控任务
 2. 按 `interval` 拉取新评论；未在数据库中出现过的评论视为新评论
 3. 根据 `use_ai` 生成回复并发送；成功后写入 SQLite
-4. 若配置了 `uploader_uid`，会周期性拉取最新投稿，新视频写入配置并开始监控
+4. 若配置了 `uploader_uid`，会周期性拉取最新投稿，新视频写入数据库并开始监控
 
 ## 注意事项与风控
 
