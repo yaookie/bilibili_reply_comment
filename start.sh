@@ -34,7 +34,7 @@ fi
 source "${VENV_DIR}/bin/activate"
 
 echo "[提示] 检查依赖包..."
-if ! python -c "import yaml, openai, bilibili_api, httpx" >/dev/null 2>&1; then
+if ! python -c "import yaml, openai, bilibili_api" >/dev/null 2>&1; then
   echo "[提示] 安装依赖包..."
   pip install -r requirements.txt
 else
