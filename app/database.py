@@ -136,6 +136,16 @@ class DatabaseManager:
             'CREATE INDEX IF NOT EXISTS idx_monitored_videos_enabled ON monitored_videos(enabled)'
         )
 
+        # 键值元数据（如全量同步是否完成）
+        cursor.execute('''
+                       CREATE TABLE IF NOT EXISTS app_meta
+                       (
+                           key   TEXT PRIMARY KEY,
+                           value TEXT,
+                           updated_at TIMESTAMP
+                       )
+                       ''')
+
         # 创建索引以提高查询性能
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_replied_comments_bvid ON replied_comments(bvid)')
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_replied_comments_rpid ON replied_comments(rpid)')
@@ -383,6 +393,33 @@ class DatabaseManager:
         count = cursor.fetchone()[0]
         cursor.close()
         return count
+
+    # ---------- 元数据 ----------
+    def get_meta(self, key: str, default: str = None) -> str | None:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT value FROM app_meta WHERE key = ?', (key,))
+        row = cursor.fetchone()
+        cursor.close()
+        return row[0] if row else default
+
+    def set_meta(self, key: str, value: str):
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            '''INSERT INTO app_meta (key, value, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at''',
+            (key, value, now)
+        )
+        conn.commit()
+        cursor.close()
+
+    def is_full_sync_done(self, uid: str) -> bool:
+        return self.get_meta(f'full_sync_done:{uid}', '0') == '1'
+
+    def set_full_sync_done(self, uid: str, done: bool = True):
+        self.set_meta(f'full_sync_done:{uid}', '1' if done else '0')
 
 
 database_manager = DatabaseManager()

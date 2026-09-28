@@ -316,25 +316,27 @@ async def main():
         if backfilled:
             logger.info(f"已从 discovered_videos 回填监控视频 {backfilled} 个")
 
-    # 空库或手动强制：启动前全量同步
-    # 若监控数 ≤ 增量窗口，多半是历史「只拉最新 N 条」遗留，补一次全量
-    latest_count = int(app_config.get('video_discovery_latest_count', 10) or 10)
+    # 空库、强制、或尚未完成过「完整全量同步」：启动前全量
     force_full = bool(app_config.get('video_full_sync_on_start', False))
+    uploader_uid = app_config.get('uploader_uid')
     monitored_now = monitored_video_manager.count(enabled_only=False)
-    need_full_sync = bool(app_config.get('uploader_uid')) and (
-        force_full or monitored_now == 0 or monitored_now <= latest_count
+    need_full_sync = bool(uploader_uid) and (
+        force_full
+        or monitored_now == 0
+        or not database_manager.is_full_sync_done(str(uploader_uid))
     )
     if need_full_sync:
         logger.info(
             f"准备全量同步 UP 主投稿（当前监控 {monitored_now} 个，"
-            f"force={force_full}, 窗口={latest_count}）…"
+            f"force={force_full}, full_sync_done="
+            f"{database_manager.is_full_sync_done(str(uploader_uid))}）…"
         )
         try:
             synced = await discover_and_add_new_videos(
-                str(app_config['uploader_uid']),
+                str(uploader_uid),
                 force_full_sync=True,
             )
-            logger.info(f"启动前全量同步完成，新增 {len(synced)} 个视频")
+            logger.info(f"启动前全量同步结束，本轮新增 {len(synced)} 个视频")
         except Exception as e:
             logger.error(f"启动前全量同步失败: {e}", exc_info=True)
 

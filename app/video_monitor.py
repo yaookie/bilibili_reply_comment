@@ -65,18 +65,15 @@ async def get_uploader_videos(
     count: int = 10,
     full_sync: bool = False,
     stop_at_known: set = None,
-) -> List[Dict]:
+) -> Dict:
     """获取UP主投稿视频
 
-    Args:
-        uid: UP主UID
-        count: 仅在既非全量、也未提供 stop_at_known 时，取最新 N 条
-        full_sync: True 时分页拉取全部投稿（首次空库用）
-        stop_at_known: 增量模式——按时间倒序翻页，遇到已在集合中的 bvid 即停止
-                       （可覆盖一次更新远超 N 条的情况）
-
     Returns:
-        视频信息列表，包含 bvid、title（增量时一般为「尚未入库」的新视频）
+        {
+          "videos": [{"bvid","title"}, ...],
+          "complete": bool,
+          "api_total": int|None,
+        }
     """
     max_retries = 3
     retry_delay = 5
@@ -85,23 +82,33 @@ async def get_uploader_videos(
         page_size = max(1, min(int(count), 50))
 
     known = stop_at_known or set()
+    best_partial = []
+    best_total = None
 
     for attempt in range(max_retries):
+        result = []
+        api_total = None
         try:
             u = user.User(uid=int(uid))
-            result = []
             pn = 1
             if full_sync:
                 max_pages = 200
             elif stop_at_known is not None:
-                # 增量翻页直到碰到已知视频；上限防止异常情况下打爆接口
                 max_pages = 50
             else:
                 max_pages = 1
 
             hit_known = False
+            incomplete = False
             while pn <= max_pages:
                 videos = await u.get_videos(pn=pn, ps=page_size)
+                page_info = videos.get('page') or {}
+                if api_total is None and page_info.get('count') is not None:
+                    try:
+                        api_total = int(page_info.get('count'))
+                    except (TypeError, ValueError):
+                        api_total = None
+
                 vlist = videos.get('list', {}).get('vlist', [])
                 if not vlist:
                     break
@@ -109,7 +116,6 @@ async def get_uploader_videos(
                 for v in vlist:
                     bvid = v['bvid']
                     if stop_at_known is not None and bvid in known:
-                        # 投稿列表按时间倒序：碰到已同步过的，后面更旧的都应已在库中
                         hit_known = True
                         break
 
@@ -124,25 +130,49 @@ async def get_uploader_videos(
                     break
                 if not full_sync and stop_at_known is None:
                     break
-                if len(vlist) < page_size:
-                    break
+
+                if full_sync:
+                    if api_total is not None and len(result) >= api_total:
+                        break
+                    if len(vlist) < page_size and (api_total is None or len(result) >= api_total):
+                        break
+                    if len(vlist) < page_size and api_total is not None and len(result) < api_total:
+                        logger.warning(
+                            f"全量同步第 {pn} 页只返回 {len(vlist)} 条，"
+                            f"已获取 {len(result)}/{api_total}，继续翻页…"
+                        )
+                else:
+                    if len(vlist) < page_size:
+                        break
 
                 pn += 1
+                if pn > max_pages:
+                    incomplete = True
+                    logger.warning(f"已达翻页上限 {max_pages}，全量同步可能不完整")
+                    break
                 await asyncio.sleep(1.0)
 
             if full_sync:
-                mode = "全量"
+                if api_total is not None and len(result) < api_total:
+                    incomplete = True
+                complete = not incomplete
+                mode = f"全量({'完整' if complete else '不完整'}, api_total={api_total})"
             elif stop_at_known is not None:
+                complete = True
                 mode = f"增量(遇已知即停, 翻页{pn})"
             else:
+                complete = True
                 mode = "增量(固定窗口)"
+                result = result[:count]
+
             logger.info(f"获取到UP主 {uid} 的 {len(result)} 个投稿（{mode}）")
-            if not full_sync and stop_at_known is None:
-                return result[:count]
-            return result
+            return {"videos": result, "complete": complete, "api_total": api_total}
 
         except Exception as e:
             error_msg = str(e)
+            if result:
+                best_partial = list(result)
+                best_total = api_total
 
             if '412' in error_msg:
                 if attempt < max_retries - 1:
@@ -152,32 +182,27 @@ async def get_uploader_videos(
                     continue
                 logger.error(
                     f"触发B站风控(412)，已重试{max_retries}次仍失败。"
-                    f"建议：1)降低检查频率 2)检查Cookie是否有效 3)稍后再试"
+                    f"将先保存已获取的 {len(best_partial)} 条，并标记全量未完成以便下次继续。"
                 )
-                return []
+                return {"videos": best_partial, "complete": False, "api_total": best_total}
 
             logger.error(f"获取UP主 {uid} 视频失败: {e}")
-            return []
+            return {"videos": best_partial, "complete": False, "api_total": best_total}
 
-    return []
+    return {"videos": best_partial, "complete": False, "api_total": best_total}
 
 
 async def get_uploader_latest_videos(uid: str, count: int = 5) -> List[Dict]:
     """获取UP主的最新投稿视频（兼容旧调用）"""
-    return await get_uploader_videos(uid, count=count, full_sync=False)
+    data = await get_uploader_videos(uid, count=count, full_sync=False)
+    return data.get('videos') or []
 
 
 async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False,
                                      force_full_sync: bool = False) -> List[str]:
     """发现并添加UP主的新视频到监控列表（写入 SQLite）
 
-    Args:
-        uploader_uid: UP主UID
-        auto_save: 兼容旧参数，已无实际作用（视频直接落库）
-        force_full_sync: 强制全量同步全部投稿
-
-    Returns:
-        新添加的视频BVID列表
+    未完成「完整全量同步」前，不会走遇已知即停的增量逻辑，避免风控中断后漏掉更早投稿。
     """
     from .database import monitored_video_manager, database_manager
 
@@ -186,34 +211,48 @@ async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False
     config_manager = ConfigManager()
     app_config = config_manager.get_app_config()
     default_ai_style = app_config.get('default_ai_style', 'humorous')
+    uid = str(uploader_uid)
 
-    discovered_count = video_discovery_manager.get_discovered_count(str(uploader_uid))
+    discovered_count = video_discovery_manager.get_discovered_count(uid)
     monitored_count = monitored_video_manager.count(enabled_only=False)
-    full_sync = force_full_sync or discovered_count == 0 or monitored_count == 0
+    full_sync_done = database_manager.is_full_sync_done(uid)
+
+    full_sync = (
+        force_full_sync
+        or discovered_count == 0
+        or monitored_count == 0
+        or not full_sync_done
+    )
 
     if full_sync:
         logger.info(
-            f"执行全量同步（discovered={discovered_count}, monitored={monitored_count}），"
-            f"将分页拉取该 UP 的全部投稿…"
+            f"执行全量同步（discovered={discovered_count}, monitored={monitored_count}, "
+            f"full_sync_done={full_sync_done}）…"
         )
-        latest_videos = await get_uploader_videos(uploader_uid, full_sync=True)
+        fetch = await get_uploader_videos(uploader_uid, full_sync=True)
     else:
-        # 增量：倒序翻页直到碰到库里已有的视频，避免一次更新超过固定窗口时漏稿
         known = {
             item['bvid']
-            for item in database_manager.list_discovered_videos(uid=str(uploader_uid))
+            for item in database_manager.list_discovered_videos(uid=uid)
         }
-        # 监控表里有、发现表暂无的也视为已知，防止重复拉入判断异常
         for v in monitored_video_manager.list_videos(enabled_only=False):
             known.add(v['bvid'])
 
         logger.info(f"执行增量同步（已知 {len(known)} 个，遇已知 bvid 即停止翻页）")
-        latest_videos = await get_uploader_videos(
+        fetch = await get_uploader_videos(
             uploader_uid, full_sync=False, stop_at_known=known
         )
 
+    latest_videos = fetch.get('videos') or []
+    sync_complete = bool(fetch.get('complete'))
+    api_total = fetch.get('api_total')
+
     if not latest_videos:
-        logger.debug("未获取到新视频列表（可能没有更新）")
+        if full_sync:
+            database_manager.set_full_sync_done(uid, False)
+            logger.warning("全量同步未获取到视频，已标记未完成，下次继续全量重试")
+        else:
+            logger.debug("未获取到新视频列表（可能没有更新）")
         return []
 
     new_added = []
@@ -222,9 +261,7 @@ async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False
         bvid = vid['bvid']
         title = vid['title']
 
-        # 检查是否已发现过
         if video_discovery_manager.is_discovered(uploader_uid, bvid):
-            # 已发现但仍可能不在监控表（例如只同步了 discovered）
             if not monitored_video_manager.is_monitored(bvid):
                 if config_manager.add_video_to_config(
                     bvid, use_ai=True, ai_style=default_ai_style, title=title
@@ -235,13 +272,30 @@ async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False
                 logger.debug(f"视频已发现: {title} ({bvid})")
             continue
 
-        # 标记为已发现
         video_discovery_manager.mark_discovered(uid=uploader_uid, bvid=bvid, title=title)
 
-        # 添加到监控数据库
         if config_manager.add_video_to_config(bvid, use_ai=True, ai_style=default_ai_style, title=title):
             new_added.append(bvid)
             logger.info(f"✓ 新视频已添加监控: {title} ({bvid}) [风格: {default_ai_style}]")
+
+    if full_sync:
+        monitored_after = monitored_video_manager.count(enabled_only=False)
+        aligned = True
+        if api_total is not None and monitored_after < max(api_total - 2, 0):
+            aligned = False
+            logger.warning(
+                f"全量同步后监控数 {monitored_after} < 接口投稿数 {api_total}，视为未完成"
+            )
+
+        done = sync_complete and aligned
+        database_manager.set_full_sync_done(uid, done)
+        if done:
+            logger.info(f"全量同步已完成（监控 {monitored_after} 个），之后改为增量发现")
+        else:
+            logger.warning(
+                "全量同步不完整（风控/翻页中断/数量不足），"
+                "下次仍会全量重试，不会因为已有部分视频而漏掉更早投稿"
+            )
 
     if new_added:
         logger.info(f"共发现/补入 {len(new_added)} 个视频")
