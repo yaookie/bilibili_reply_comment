@@ -29,6 +29,11 @@ class AutoReplyService:
         logger.info("=" * 60)
 
         app_config = ConfigManager().get_app_config()
+        if ConfigManager().get_video_date_ranges():
+            logger.info(
+                f"日期过滤对库中已有监控视频同样生效（不回复范围外稿件）："
+                f"{ConfigManager().describe_video_date_filter()}"
+            )
         default_interval = app_config.get('default_check_interval', 60)
         default_ai_style = app_config.get('default_ai_style', 'humorous')
         default_template = "@{username} 感谢你的评论！"

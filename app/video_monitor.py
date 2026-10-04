@@ -129,6 +129,30 @@ def _video_in_any_range(pub_ts: Optional[int], ranges) -> bool:
     return any(_video_in_date_range(pub_ts, after, before) for after, before in ranges)
 
 
+def _should_reply_by_pubdate(pub_ts: Optional[int]) -> bool:
+    ranges = ConfigManager().get_video_date_ranges()
+    if not ranges:
+        return True
+    return _video_in_any_range(pub_ts, ranges)
+
+
+_SKIPPED_DATE_LOGGED = set()
+
+
+def _log_skip_out_of_range(bvid: str, title: str, pub_ts: Optional[int]):
+    key = (bvid, ConfigManager().describe_video_date_filter())
+    day = _pub_day(pub_ts).isoformat() if pub_ts else "未知"
+    msg = (
+        f"跳过日期范围外的视频（不回复）: {title} ({bvid}) "
+        f"投稿日={day}，过滤={ConfigManager().describe_video_date_filter()}"
+    )
+    if key not in _SKIPPED_DATE_LOGGED:
+        logger.info(msg)
+        _SKIPPED_DATE_LOGGED.add(key)
+    else:
+        logger.debug(msg)
+
+
 def _date_ranges_oldest_start(ranges) -> Optional[date]:
     """所有日期段里最早的起点；若某段没有起点则无法按过旧停翻页。"""
     if not ranges:
@@ -959,6 +983,10 @@ async def reply_to_new_comments(bvid: str, reply_template: str = "感谢评论�
     video_title = video_info.get('title', '')
     video_desc = video_info.get('desc', '')
     video_url = f"https://www.bilibili.com/video/{bvid}"
+    pub_ts = _item_pubdate_ts(video_info)
+    if not _should_reply_by_pubdate(pub_ts):
+        _log_skip_out_of_range(bvid, video_title, pub_ts)
+        return {'success': 0, 'failed': 0, 'total': 0}
     credential = _get_credential()
 
     new_comments = await get_new_comments(bvid)
@@ -1052,6 +1080,10 @@ async def monitor_single_video(bvid: str, reply_template: str, interval: int,
         try:
             v = _make_video(bvid)
             info = await v.get_info()
+            pub_ts = _item_pubdate_ts(info)
+            if not _should_reply_by_pubdate(pub_ts):
+                _log_skip_out_of_range(bvid, info.get('title', ''), pub_ts)
+                break
             ai_tag = "[AI]" if use_ai else "[模板]"
             style_info = f" ({ai_style})" if use_ai and ai_style else ""
             logger.info(f"{ai_tag}{style_info} 开始监控: {info['title']} ({bvid})")
