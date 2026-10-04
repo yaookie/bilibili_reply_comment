@@ -209,7 +209,7 @@ class DatabaseManager:
         """检查视频是否已被发现"""
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT 1 FROM discovered_videos WHERE uid = ? AND bvid = ?', (uid, bvid))
+        cursor.execute('SELECT 1 FROM discovered_videos WHERE uid = ? AND bvid = ?', (str(uid), bvid))
         result = cursor.fetchone()
         cursor.close()
         return result is not None
@@ -225,7 +225,7 @@ class DatabaseManager:
             cursor.execute('''
                 INSERT OR IGNORE INTO discovered_videos (uid, bvid, title, discovered_at)
                 VALUES (?, ?, ?, ?)
-            ''', (uid, bvid, title, discovered_at))
+            ''', (str(uid), bvid, title, discovered_at))
             conn.commit()
         except Exception as e:
             logger.error(f"标记视频发现失败: {e}")
@@ -236,7 +236,7 @@ class DatabaseManager:
         """获取UP主的已发现视频数量"""
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM discovered_videos WHERE uid = ?', (uid,))
+        cursor.execute('SELECT COUNT(*) FROM discovered_videos WHERE uid = ?', (str(uid),))
         count = cursor.fetchone()[0]
         cursor.close()
         return count
