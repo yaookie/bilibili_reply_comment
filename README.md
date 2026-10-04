@@ -70,6 +70,11 @@ cp config.example.yaml config.yaml
 编辑 `config.yaml`，至少填写：
 
 1. **B站凭证**（`bilibili.credential`）
+
+   ![Cookie 字段示意](docs/images/Cookie.png)
+
+   ![Cookie 字段示意（含 ac_time_value）](docs/images/ac_time_value.png)
+
 2. **千问 API Key**（若 `use_ai: true`）
 3. **`app.uploader_uid`** 和/或 **`videos`** 列表
 
