@@ -1,6 +1,10 @@
 # video_monitor.py - 视频监控和回复模块
 import asyncio
+import inspect
+import json
 from typing import List, Dict, Optional
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 from bilibili_api import comment, video, user
 from .config import ConfigManager
 from .database import reply_record_manager, video_discovery_manager
@@ -89,9 +93,24 @@ def _item_to_video(item) -> Optional[Dict]:
     return {"bvid": str(bvid), "title": title}
 
 
-def _own_mid() -> str:
+_OWN_MID_CACHE = {"mid": ""}
+
+
+def _own_mid_from_config() -> str:
     cred = ConfigManager().get_bilibili_credential() or {}
     return str(cred.get("dedeuserid") or "").strip()
+
+
+def _mid_eq(a, b) -> bool:
+    sa, sb = str(a or "").strip(), str(b or "").strip()
+    if not sa or not sb:
+        return False
+    if sa == sb:
+        return True
+    try:
+        return int(sa) == int(sb)
+    except (TypeError, ValueError):
+        return False
 
 
 def _comment_mid(item) -> str:
@@ -104,29 +123,43 @@ def _comment_mid(item) -> str:
     return str(mid or "").strip()
 
 
+def _comment_rpid(item) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("rpid_str") or item.get("rpid") or "").strip()
+
+
 def _nested_replies(root) -> list:
-    replies = root.get("replies") if isinstance(root, dict) else None
-    return replies if isinstance(replies, list) else []
+    if not isinstance(root, dict):
+        return []
+    replies = root.get("replies")
+    if isinstance(replies, list):
+        return replies
+    for key in ("reply", "children"):
+        val = root.get(key)
+        if isinstance(val, list):
+            return val
+    return []
+
+
+def _walk_replies(root):
+    for item in _nested_replies(root):
+        yield item
+        yield from _walk_replies(item)
 
 
 def _preview_has_own_reply(root, own_mid: str) -> bool:
     if not own_mid:
         return False
-    return any(_comment_mid(item) == own_mid for item in _nested_replies(root))
+    return any(_mid_eq(_comment_mid(item), own_mid) for item in _walk_replies(root))
 
 
-def _reply_count(root) -> int:
-    if not isinstance(root, dict):
-        return 0
-    for key in ("rcount", "count"):
-        val = root.get(key)
-        if val is None:
-            continue
-        try:
-            return int(val)
-        except (TypeError, ValueError):
-            continue
-    return 0
+def _is_child_of(item, root_rpid: str) -> bool:
+    if not root_rpid or not isinstance(item, dict):
+        return False
+    parent = str(item.get("parent") or "").strip()
+    root = str(item.get("root") or "").strip()
+    return _mid_eq(parent, root_rpid) or _mid_eq(root, root_rpid)
 
 
 def _extract_sub_replies(data) -> list:
@@ -144,70 +177,184 @@ def _extract_sub_replies(data) -> list:
     return []
 
 
-async def _sub_comments_have_own_reply(oid, rpid, own_mid: str, credential) -> Optional[bool]:
-    """拉取楼中楼，查找是否已有自己的回复。
-
-    Returns:
-        True/False：已确认；None：接口失败，本轮先不回复以免重复。
-    """
-    try:
-        CommentCls = getattr(comment, "Comment", None)
-        if CommentCls is None:
-            logger.warning("当前 bilibili-api 不支持 Comment 楼中楼查询")
-            return None
-        sub = CommentCls(
-            oid=int(oid),
-            type_=comment.CommentResourceType.VIDEO,
-            rpid=int(rpid),
-            credential=credential,
-        )
-    except Exception as e:
-        logger.warning(f"无法创建楼中楼查询 rpid={rpid}: {e}")
-        return None
-
-    max_pages = 5
-    for pn in range(1, max_pages + 1):
+def _credential_cookies(credential) -> dict:
+    cookies = {}
+    mapping = {
+        "sessdata": "SESSDATA",
+        "bili_jct": "bili_jct",
+        "buvid3": "buvid3",
+        "dedeuserid": "DedeUserID",
+        "ac_time_value": "ac_time_value",
+    }
+    getter = getattr(credential, "get_cookies", None)
+    if callable(getter):
         try:
-            try:
-                data = await sub.get_sub_comments(page_index=pn)
-            except TypeError:
-                data = await sub.get_sub_comments(pn)
-        except Exception as e:
-            logger.warning(f"拉取楼中楼失败 rpid={rpid} page={pn}: {e}")
-            return None
+            raw = getter() or {}
+            if isinstance(raw, dict):
+                cookies.update({str(k): str(v) for k, v in raw.items() if v is not None})
+        except Exception:
+            pass
+    for attr, name in mapping.items():
+        val = getattr(credential, attr, None)
+        if val:
+            cookies[name] = str(val)
+    return cookies
 
-        replies = _extract_sub_replies(data)
-        if not replies:
-            return False
-        if any(_comment_mid(item) == own_mid for item in replies):
+
+def _http_get_json(url: str, cookies: dict) -> dict:
+    cookie_header = "; ".join(f"{k}={v}" for k, v in cookies.items() if v)
+    req = Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Referer": "https://www.bilibili.com",
+            "Cookie": cookie_header,
+        },
+        method="GET",
+    )
+    with urlopen(req, timeout=15) as resp:
+        body = resp.read().decode("utf-8", errors="replace")
+    return json.loads(body)
+
+
+async def _resolve_own_mid(credential) -> str:
+    cached = _OWN_MID_CACHE.get("mid")
+    if cached:
+        return cached
+
+    mid = ""
+    getter = getattr(user, "get_self_info", None)
+    if callable(getter):
+        try:
+            info = await getter(credential)
+            if isinstance(info, dict):
+                mid = str(info.get("mid") or "").strip()
+        except TypeError:
+            try:
+                info = await getter(credential=credential)
+                if isinstance(info, dict):
+                    mid = str(info.get("mid") or "").strip()
+            except Exception as e:
+                logger.warning(f"获取登录账号信息失败，改用配置中的 DedeUserID: {e}")
+        except Exception as e:
+            logger.warning(f"获取登录账号信息失败，改用配置中的 DedeUserID: {e}")
+
+    if not mid:
+        mid = _own_mid_from_config()
+    _OWN_MID_CACHE["mid"] = mid
+    if mid:
+        logger.info(f"当前账号 mid={mid}，将用它识别自己的回复")
+    else:
+        logger.warning("无法确定当前账号 mid，可能重复回复")
+    return mid
+
+
+def _page_has_own_child(page_comments: list, root_rpid: str, own_mid: str) -> bool:
+    if not own_mid or not root_rpid:
+        return False
+    for item in page_comments or []:
+        if _mid_eq(_comment_mid(item), own_mid) and _is_child_of(item, root_rpid):
             return True
-        if len(replies) < 10:
-            return False
-        await asyncio.sleep(0.4)
+        if _comment_rpid(item) == root_rpid:
+            if any(_mid_eq(_comment_mid(child), own_mid) for child in _walk_replies(item)):
+                return True
+        for child in _walk_replies(item):
+            if _mid_eq(_comment_mid(child), own_mid) and _is_child_of(child, root_rpid):
+                return True
     return False
 
 
-async def has_own_reply_on_comment(oid, root, own_mid: str, credential) -> Optional[bool]:
-    """当前评论下是否已有自己的回复（预览 + 必要时拉楼中楼）。"""
+async def _list_sub_replies(oid, rpid, credential) -> Optional[list]:
+    """拉取某条评论的楼中楼。失败返回 None。"""
+    collected = []
+
+    CommentCls = getattr(comment, "Comment", None)
+    if CommentCls is not None:
+        try:
+            sub = CommentCls(
+                oid=int(oid),
+                type_=comment.CommentResourceType.VIDEO,
+                rpid=int(rpid),
+                credential=credential,
+            )
+            for pn in range(1, 6):
+                try:
+                    data = await sub.get_sub_comments(page_index=pn, page_size=20)
+                except TypeError:
+                    try:
+                        data = await sub.get_sub_comments(page_index=pn)
+                    except TypeError:
+                        data = await sub.get_sub_comments(pn)
+                replies = _extract_sub_replies(data)
+                if not replies:
+                    break
+                collected.extend(replies)
+                if len(replies) < 10:
+                    break
+                await asyncio.sleep(0.35)
+        except Exception as e:
+            logger.warning(f"库接口拉取楼中楼失败 rpid={rpid}: {e}")
+
+    if collected:
+        return collected
+
+    try:
+        cookies = _credential_cookies(credential)
+        for pn in range(1, 6):
+            params = urlencode({
+                "oid": int(oid),
+                "type": 1,
+                "root": int(rpid),
+                "ps": 20,
+                "pn": pn,
+            })
+            url = f"https://api.bilibili.com/x/v2/reply/reply?{params}"
+            payload = await asyncio.to_thread(_http_get_json, url, cookies)
+            if int(payload.get("code") or 0) != 0:
+                logger.warning(
+                    f"楼中楼接口失败 rpid={rpid} code={payload.get('code')} {payload.get('message')}"
+                )
+                return collected if collected else None
+            replies = _extract_sub_replies(payload.get("data") or payload)
+            if replies is None:
+                replies = []
+            if not replies:
+                return collected
+            collected.extend(replies)
+            if len(replies) < 20:
+                break
+            await asyncio.sleep(0.35)
+        return collected
+    except Exception as e:
+        logger.warning(f"HTTP 拉取楼中楼失败 rpid={rpid}: {e}")
+        return collected if collected else None
+
+
+async def has_own_reply_on_comment(
+    oid, root, own_mid: str, credential, page_comments: list = None
+) -> Optional[bool]:
+    """当前评论下是否已有自己的回复。无法确认时返回 None（本轮不发）。"""
+    root_rpid = _comment_rpid(root)
     if not own_mid:
-        logger.warning("未配置 dedeuserid，无法识别自己的回复")
-        return False
+        logger.warning("未配置/未识别当前账号 mid，无法判断是否已回复")
+        return None
     if _preview_has_own_reply(root, own_mid):
         return True
+    if _page_has_own_child(page_comments or [], root_rpid, own_mid):
+        return True
 
-    preview = _nested_replies(root)
-    rcount = _reply_count(root)
-    if rcount <= 0:
-        return False
-    if rcount <= len(preview):
-        return False
-
-    return await _sub_comments_have_own_reply(oid, root.get("rpid"), own_mid, credential)
+    replies = await _list_sub_replies(oid, root_rpid, credential)
+    if replies is None:
+        return None
+    return any(_mid_eq(_comment_mid(item), own_mid) for item in replies)
 
 
 def _remember_handled_comment(bvid: str, cmt: dict, reason: str = ""):
     """把已处理/已有自己回复的评论写入本地，避免下轮再请求楼中楼。"""
-    rpid = str(cmt.get("rpid") or "")
+    rpid = _comment_rpid(cmt)
     if not rpid:
         return
     member = cmt.get("member") or {}
@@ -215,7 +362,7 @@ def _remember_handled_comment(bvid: str, cmt: dict, reason: str = ""):
     message = (cmt.get("content") or {}).get("message") if isinstance(cmt.get("content"), dict) else None
     reply_record_manager.mark_replied(bvid, rpid, username=username, message=message)
     if reason:
-        logger.debug(f"{bvid} rpid={rpid} 跳过回复: {reason}")
+        logger.info(f"{bvid} rpid={rpid} 跳过回复: {reason}")
 
 
 async def get_new_comments(bvid: str) -> list:
@@ -231,7 +378,7 @@ async def get_new_comments(bvid: str) -> list:
     comments = []
     pag = ""
     credential = _get_credential()
-    own_mid = _own_mid()
+    own_mid = await _resolve_own_mid(credential)
     max_pages = 10
     page = 0
 
@@ -253,16 +400,18 @@ async def get_new_comments(bvid: str) -> list:
                 break
 
             for r in replies:
-                rpid = str(r.get('rpid') or '')
+                rpid = _comment_rpid(r)
                 if not rpid:
                     continue
-                if own_mid and _comment_mid(r) == own_mid:
+                if own_mid and _mid_eq(_comment_mid(r), own_mid):
                     _remember_handled_comment(bvid, r, "自己的评论")
                     continue
                 if reply_record_manager.is_replied(bvid, rpid):
                     continue
 
-                own_replied = await has_own_reply_on_comment(oid, r, own_mid, credential)
+                own_replied = await has_own_reply_on_comment(
+                    oid, r, own_mid, credential, page_comments=replies
+                )
                 if own_replied is True:
                     _remember_handled_comment(bvid, r, "评论下已有自己的回复")
                     continue
@@ -650,17 +799,26 @@ async def reply_to_single_comment(oid: int, bvid: str, cmt: dict,
                                   reply_message: str, credential) -> tuple:
     """回复单条评论，记录并输出收到的评论内容与回复内容"""
     username = cmt['member']['uname']
-    rpid = cmt['rpid']
+    rpid = _comment_rpid(cmt) or cmt.get('rpid')
     original_message = cmt.get('content', {}).get('message', '')
 
     try:
-        await comment.send_comment(
-            oid=oid,
-            type_=comment.CommentResourceType.VIDEO,
-            text=reply_message,
-            root=rpid,
-            credential=credential
-        )
+        send_kwargs = {
+            "text": reply_message,
+            "oid": oid,
+            "type_": comment.CommentResourceType.VIDEO,
+            "credential": credential,
+        }
+        try:
+            rpid_int = int(str(rpid).strip())
+        except (TypeError, ValueError):
+            rpid_int = rpid
+        sig = inspect.signature(comment.send_comment)
+        if "root" in sig.parameters:
+            send_kwargs["root"] = rpid_int
+        if "parent" in sig.parameters:
+            send_kwargs["parent"] = rpid_int
+        await comment.send_comment(**send_kwargs)
 
         # 标记为已回复（保留原有调用）
         reply_record_manager.mark_replied(bvid, rpid, username=username, message=original_message)
@@ -731,10 +889,10 @@ async def reply_to_new_comments(bvid: str, reply_template: str = "感谢评论�
         username = member_info.get('uname', '')
         message = (cmt.get('content') or {}).get('message', '')
         user_mid = member_info.get('mid')
-        rpid = str(cmt.get('rpid') or '')
-        own_mid = _own_mid()
+        rpid = _comment_rpid(cmt)
+        own_mid = await _resolve_own_mid(credential)
 
-        if own_mid and _comment_mid(cmt) == own_mid:
+        if own_mid and _mid_eq(_comment_mid(cmt), own_mid):
             _remember_handled_comment(bvid, cmt, "自己的评论")
             continue
         if rpid and reply_record_manager.is_replied(bvid, rpid):
@@ -769,7 +927,7 @@ async def reply_to_new_comments(bvid: str, reply_template: str = "感谢评论�
             user_comment_time = datetime.fromtimestamp(cmt.get('ctime', 0)).strftime('%Y-%m-%d %H:%M:%S')
             reply_record_manager.mark_replied_with_details(
                 bvid,
-                str(cmt['rpid']),
+                str(_comment_rpid(cmt) or cmt.get('rpid')),
                 username=username,
                 message=message,
                 mid=user_mid,
