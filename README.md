@@ -11,41 +11,6 @@
 - 配置热加载：运行中修改 `config.yaml` 会自动重载
 - 日志输出到控制台与 `logs/` 目录
 
-## 目录结构
-
-```text
-bilibili_reply_comment/
-├── bilibili_auto_reply.py   # 程序入口
-├── config.example.yaml      # 配置模板（可提交到 Git）
-├── config.yaml              # 实际配置（含密钥，已被 gitignore）
-├── requirements.txt         # Python 依赖
-├── start.sh                 # macOS / Linux 启动脚本
-├── start.bat                # Windows 启动脚本
-├── app/                     # 业务包
-│   ├── main.py              # 服务编排与生命周期
-│   ├── config.py            # 配置加载 / 校验 / 热更新
-│   ├── api_clients.py       # B站凭证与千问客户端
-│   ├── video_monitor.py     # 评论拉取、回复、视频发现
-│   ├── database.py          # SQLite 持久化
-│   └── logger.py            # 日志
-├── data/                    # 运行数据（自动创建）
-│   └── bilibili_reply.db    # 回复记录、已发现视频、监控视频列表
-└── logs/                    # 日志目录（自动创建）
-    └── bilibili_reply_comment.log
-```
-
-## 运行前需要准备的文件 / 文件夹
-
-| 路径 | 是否必需 | 说明 |
-|------|----------|------|
-| `config.yaml` | **必需** | 从 `config.example.yaml` 复制后填写 |
-| `requirements.txt` | 必需 | 依赖清单，安装时使用 |
-| `data/` | 自动创建 | 存放 SQLite 数据库 |
-| `logs/` | 自动创建 | 存放运行日志 |
-| `.venv/` 或 `venv/` | 自动创建 | Python 虚拟环境 |
-
-> 启动脚本会自动创建 `data/`、`logs/` 和虚拟环境；数据库文件也会在首次运行时生成。
-
 ## 环境要求
 
 - Python **3.10+**（推荐 3.11 / 3.12）
@@ -55,13 +20,13 @@ bilibili_reply_comment/
 
 ## 快速开始
 
-### 1. 获取代码并进入目录
+### 1. 进入项目目录
 
 ```bash
 cd bilibili_reply_comment
 ```
 
-### 2. 创建配置文件
+### 2. 创建并填写配置
 
 ```bash
 cp config.example.yaml config.yaml
@@ -69,16 +34,15 @@ cp config.example.yaml config.yaml
 
 编辑 `config.yaml`，至少填写：
 
-1. **B站凭证**（`bilibili.credential`）
+1. **B站凭证**（`bilibili.credential`）— 获取步骤见 [如何获取 B站 Cookie](#如何获取-b站-cookie)
+2. **千问 API Key**（`qwen.api_key`，若使用 AI 回复）
+3. **`app.uploader_uid`** 和/或 **`videos`** 列表（至少配置一种监控来源）
 
-   ![Cookie 字段示意](docs/images/Cookie.png)
-
-   ![Cookie 字段示意（含 ac_time_value）](docs/images/ac_time_value.png)
-
-2. **千问 API Key**（若 `use_ai: true`）
-3. **`app.uploader_uid`** 和/或 **`videos`** 列表
+完整字段说明见 [配置说明](#配置说明)，也可直接对照 `config.example.yaml`。
 
 ### 3. 安装依赖并启动
+
+启动脚本会自动创建虚拟环境、`data/`、`logs/`，并安装依赖。
 
 **macOS / Linux：**
 
@@ -110,8 +74,8 @@ python bilibili_auto_reply.py
 ## 如何获取 B站 Cookie
 
 1. 浏览器登录 [https://www.bilibili.com](https://www.bilibili.com)
-2. 打开开发者工具（F12）→ **Application / 存储** → **Cookies**
-3. 复制以下字段到 `config.yaml`：
+2. 打开开发者工具（F12）→ **应用程序 / Application / 存储** → **Cookies** → `https://www.bilibili.com`
+3. 复制以下字段到 `config.yaml` 的 `bilibili.credential`：
 
 | Cookie 名 | 配置字段 | 是否必需 |
 |-----------|----------|----------|
@@ -121,9 +85,29 @@ python bilibili_auto_reply.py
 | `DedeUserID` | `dedeuserid` | 必需 |
 | `ac_time_value` | `ac_time_value` | 建议填写 |
 
+在 Cookies 列表中可找到 `SESSDATA`、`bili_jct`、`buvid3`、`DedeUserID`：
+
+![Cookie 字段示意](docs/images/Cookie.png)
+
+`ac_time_value` 可能不在同一列表里，请按名称搜索后复制：
+
+![Cookie 字段示意（含 ac_time_value）](docs/images/ac_time_value.png)
+
 > Cookie 会过期。若出现登录失败、412 风控或发评失败，请重新从浏览器复制更新。
 
 ## 配置说明
+
+字段以 `config.example.yaml` 为准。常用项如下。
+
+### `bilibili` / `qwen` 凭证
+
+| 配置项 | 含义 |
+|--------|------|
+| `bilibili.credential.*` | B站 Cookie，见上一节 |
+| `qwen.api_key` | 通义千问 / DashScope API Key |
+| `qwen.base_url` / `qwen.model` | 接口地址与模型名，一般沿用模板即可 |
+
+也可用环境变量覆盖敏感字段，见 [环境变量](#环境变量可选)。
 
 ### `app` 应用配置
 
@@ -222,6 +206,32 @@ A: 加大 `video_discovery_interval`，更新 Cookie，稍后再试。
 
 **Q: 想清空已回复记录重新回复？**  
 A: 停止程序后删除或备份 `data/bilibili_reply.db`（会丢失去重记录，可能导致重复回复）。
+
+## 目录结构
+
+```text
+bilibili_reply_comment/
+├── bilibili_auto_reply.py   # 程序入口
+├── config.example.yaml      # 配置模板（可提交到 Git）
+├── config.yaml              # 实际配置（含密钥，已被 gitignore）
+├── requirements.txt         # Python 依赖
+├── start.sh                 # macOS / Linux 启动脚本
+├── start.bat                # Windows 启动脚本
+├── app/                     # 业务包
+│   ├── main.py              # 服务编排与生命周期
+│   ├── config.py            # 配置加载 / 校验 / 热更新
+│   ├── api_clients.py       # B站凭证与千问客户端
+│   ├── video_monitor.py     # 评论拉取、回复、视频发现
+│   ├── database.py          # SQLite 持久化
+│   └── logger.py            # 日志
+├── docs/images/             # README 配图
+├── data/                    # 运行数据（自动创建）
+│   └── bilibili_reply.db    # 回复记录、已发现视频、监控视频列表
+└── logs/                    # 日志目录（自动创建）
+    └── bilibili_reply_comment.log
+```
+
+`data/`、`logs/` 和虚拟环境由启动脚本自动创建；数据库文件会在首次运行时生成。
 
 ## 许可证与免责
 
