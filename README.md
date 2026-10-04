@@ -120,6 +120,23 @@ python bilibili_auto_reply.py
 | `uploader_uid` | UP 主 UID，开启自动发现 | 你的 UID，不需要可留空 |
 | `video_discovery_interval` | 发现新视频间隔（秒） | 建议 `3600`（1 小时） |
 | `default_ai_style` | 新视频默认 AI 风格 | 如 `natural` |
+| `video_after` | 单段：该日期及之后 | 如 `2026-09-10`，可与 `video_before` 组成一段 |
+| `video_before` | 单段：该日期及之前 | 如 `2026-01-01` |
+| `video_date_ranges` | 多段日期列表 | 见下方示例 |
+
+日期按**北京时间**、含起止当天。支持 `2026-09-10` 或 `2026年9月10日`。落在**任意一段**内即会发现。
+
+```yaml
+app:
+  # 多段：2025-10-01 至 2026-01-01，以及 2026-09-10 之后
+  video_date_ranges:
+    - after: 2025-10-01
+      before: 2026-01-01
+    - after: 2026-09-10
+    # - '2024-01-01至2024-03-31'
+```
+
+该过滤只作用于 **UP 主自动发现**。已经在数据库里的监控视频、以及 `videos` 种子导入，不会被自动移出。若要按新日期重扫，可停程序后清空或备份 `data/bilibili_reply.db` 后重启。
 
 ### `videos` 种子列表（可选）
 

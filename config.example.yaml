@@ -109,6 +109,18 @@ app:
   video_full_sync_on_start: false
   # 新发现视频默认使用的 AI 风格（需在 ai_reply_styles 中存在）
   default_ai_style: natural
+  # 只自动发现这些投稿日期范围内的视频（北京时间，含起止当天；都不填则不限制）
+  # 写法：2026-09-10 或 2026年9月10日
+  # 单段仍可用 video_after / video_before：
+  video_after: ''
+  video_before: ''
+  # 多段日期（与上面单段同时填写时会合并）
+  # video_date_ranges:
+  #   - after: 2025-10-01
+  #     before: 2026-01-01
+  #   - after: 2026-09-10          # 该日起之后
+  #   - '2024-01-01至2024-03-31'   # 也可用一串文字
+  video_date_ranges: []
 
 # ---------- 手动监控视频（可选种子）----------
 # 监控列表默认保存在 data/bilibili_reply.db 的 monitored_videos 表中，

@@ -2,6 +2,7 @@
 import asyncio
 import inspect
 import json
+from datetime import datetime, date, timedelta, timezone
 from typing import List, Dict, Optional
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -83,6 +84,63 @@ def _extract_api_total(payload) -> Optional[int]:
     return None
 
 
+CST = timezone(timedelta(hours=8))
+
+
+def _item_pubdate_ts(item) -> Optional[int]:
+    if not isinstance(item, dict):
+        return None
+    for key in ("created", "pubdate", "pubtime", "ctime", "created_at", "publish_time"):
+        val = item.get(key)
+        if val is None or val == "":
+            continue
+        try:
+            ts = int(float(val))
+        except (TypeError, ValueError):
+            continue
+        if ts <= 0:
+            continue
+        if ts > 10_000_000_000:
+            ts //= 1000
+        return ts
+    return None
+
+
+def _pub_day(ts: int) -> date:
+    return datetime.fromtimestamp(int(ts), tz=CST).date()
+
+
+def _video_in_date_range(pub_ts: Optional[int], after: Optional[date], before: Optional[date]) -> bool:
+    if after is None and before is None:
+        return True
+    if pub_ts is None:
+        return False
+    day = _pub_day(pub_ts)
+    if after and day < after:
+        return False
+    if before and day > before:
+        return False
+    return True
+
+
+def _video_in_any_range(pub_ts: Optional[int], ranges) -> bool:
+    if not ranges:
+        return True
+    return any(_video_in_date_range(pub_ts, after, before) for after, before in ranges)
+
+
+def _date_ranges_oldest_start(ranges) -> Optional[date]:
+    """所有日期段里最早的起点；若某段没有起点则无法按过旧停翻页。"""
+    if not ranges:
+        return None
+    starts = []
+    for after, _before in ranges:
+        if after is None:
+            return None
+        starts.append(after)
+    return min(starts) if starts else None
+
+
 def _item_to_video(item) -> Optional[Dict]:
     if not isinstance(item, dict):
         return None
@@ -90,7 +148,11 @@ def _item_to_video(item) -> Optional[Dict]:
     if not bvid:
         return None
     title = item.get("title") or item.get("name") or ""
-    return {"bvid": str(bvid), "title": title}
+    return {
+        "bvid": str(bvid),
+        "title": title,
+        "pubdate": _item_pubdate_ts(item),
+    }
 
 
 _OWN_MID_CACHE = {"mid": ""}
@@ -434,12 +496,26 @@ async def get_new_comments(bvid: str) -> list:
 
 
 def _collect_from_vlist(vlist, known, stop_at_known, full_sync, count, result, seen) -> bool:
-    """把一页投稿写入 result。返回 True 表示应停止翻页（遇到已知视频或达到数量）。"""
+    """把一页投稿写入 result。返回 True 表示应停止翻页（遇到已知视频、过旧投稿或达到数量）。"""
+    ranges = ConfigManager().get_video_date_ranges()
+    oldest_start = _date_ranges_oldest_start(ranges)
     for item in vlist:
         video_item = _item_to_video(item)
         if not video_item:
             continue
         bvid = video_item["bvid"]
+        pub_ts = video_item.get("pubdate")
+
+        if ranges:
+            if pub_ts is None:
+                continue
+            day = _pub_day(pub_ts)
+            if oldest_start and day < oldest_start:
+                # 比所有区间都更早，后面只会更旧
+                return True
+            if not _video_in_any_range(pub_ts, ranges):
+                continue
+
         if stop_at_known is not None and bvid in known:
             return True
         if bvid in seen:
@@ -702,6 +778,9 @@ async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False
     config_manager = ConfigManager()
     app_config = config_manager.get_app_config()
     default_ai_style = app_config.get('default_ai_style', 'humorous')
+    date_ranges = config_manager.get_video_date_ranges()
+    if date_ranges:
+        logger.info(f"只发现/监控日期范围内的视频：{config_manager.describe_video_date_filter()}")
 
     discovered_count = video_discovery_manager.get_discovered_count(uid)
     monitored_count = monitored_video_manager.count(enabled_only=False)
@@ -739,8 +818,12 @@ async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False
 
     if not latest_videos:
         if full_sync:
-            database_manager.set_full_sync_done(uid, False)
-            logger.warning("全量同步未获取到视频，已标记未完成，下次继续全量重试")
+            if date_ranges and sync_complete:
+                database_manager.set_full_sync_done(uid, True)
+                logger.info("该日期范围内没有投稿，全量同步视为完成")
+            else:
+                database_manager.set_full_sync_done(uid, False)
+                logger.warning("全量同步未获取到视频，已标记未完成，下次继续全量重试")
         else:
             logger.debug("未获取到新视频列表（可能没有更新）")
         return []
@@ -750,6 +833,12 @@ async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False
     for vid in latest_videos:
         bvid = vid['bvid']
         title = vid['title']
+        if date_ranges:
+            if not _video_in_any_range(vid.get('pubdate'), date_ranges):
+                logger.debug(
+                    f"跳过日期范围外的视频: {title} ({bvid})"
+                )
+                continue
 
         if video_discovery_manager.is_discovered(uid, bvid):
             if not monitored_video_manager.is_monitored(bvid):
@@ -771,7 +860,7 @@ async def discover_and_add_new_videos(uploader_uid: str, auto_save: bool = False
     if full_sync:
         monitored_after = monitored_video_manager.count(enabled_only=False)
         aligned = True
-        if api_total is not None and monitored_after < max(api_total - 2, 0):
+        if not date_ranges and api_total is not None and monitored_after < max(api_total - 2, 0):
             aligned = False
             logger.warning(
                 f"全量同步后监控数 {monitored_after} < 接口投稿数 {api_total}，视为未完成"

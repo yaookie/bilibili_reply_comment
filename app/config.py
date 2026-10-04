@@ -1,8 +1,85 @@
 # config.py - 配置管理模块
 import yaml
 import os
+import re
+from datetime import date, datetime
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional, Tuple
+
+
+from .logger import logger
+
+
+def parse_app_date(value) -> Optional[date]:
+    """解析配置中的日期。支持 2026-09-10、2026/9/10、2026年9月10日，以及 YAML 日期。"""
+    if value is None or value is False:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    if not text or text.lower() in ("none", "null", "~", "-", "无"):
+        return None
+    text = (
+        text.replace("年", "-")
+        .replace("月", "-")
+        .replace("日", "")
+        .replace("/", "-")
+        .replace(".", "-")
+    )
+    text = re.sub(r"\s+", "", text).strip("-")
+    match = re.match(r"^(\d{4})-(\d{1,2})(?:-(\d{1,2}))?$", text)
+    if match:
+        year, month, day = int(match.group(1)), int(match.group(2)), match.group(3)
+        try:
+            return date(year, month, int(day) if day else 1)
+        except ValueError:
+            logger.warning(f"无效的视频日期配置: {value!r}")
+            return None
+    logger.warning(f"无法解析视频日期: {value!r}，请使用如 2026-09-10 或 2026年9月10日")
+    return None
+
+
+def _normalize_date_range(after: Optional[date], before: Optional[date]) -> Optional[Tuple[Optional[date], Optional[date]]]:
+    if after is None and before is None:
+        return None
+    if after and before and after > before:
+        logger.warning(f"日期段起点 {after} 晚于终点 {before}，已忽略终点")
+        before = None
+    return (after, before)
+
+
+def parse_date_range_item(item) -> Optional[Tuple[Optional[date], Optional[date]]]:
+    """解析一段日期。支持 dict / 二元列表 / '2025-10-01至2026-01-01'。"""
+    if item is None or item is False:
+        return None
+    if isinstance(item, (date, datetime)):
+        return _normalize_date_range(parse_app_date(item), None)
+    if isinstance(item, (list, tuple)):
+        after = parse_app_date(item[0] if len(item) > 0 else None)
+        before = parse_app_date(item[1] if len(item) > 1 else None)
+        return _normalize_date_range(after, before)
+    if isinstance(item, dict):
+        after = parse_app_date(
+            item.get("after") or item.get("from") or item.get("start") or item.get("begin")
+        )
+        before = parse_app_date(
+            item.get("before") or item.get("to") or item.get("end")
+        )
+        return _normalize_date_range(after, before)
+    text = str(item).strip()
+    if not text:
+        return None
+    for sep in ("至", "~", "～", "—", "–", ",", "|"):
+        if sep in text:
+            left, right = text.split(sep, 1)
+            return _normalize_date_range(parse_app_date(left), parse_app_date(right))
+    if "/" in text:
+        parts = [p for p in text.split("/") if p.strip()]
+        if len(parts) == 2 and not re.match(r"^\d{4}/\d{1,2}/\d{1,2}$", text.replace(" ", "")):
+            return _normalize_date_range(parse_app_date(parts[0]), parse_app_date(parts[1]))
+    return _normalize_date_range(parse_app_date(text), None)
 
 
 class ConfigManager:
@@ -93,6 +170,10 @@ class ConfigManager:
                 "未在 config.yaml 配置 videos 种子列表，也未设置 app.uploader_uid。"
                 "若数据库中也无监控视频，程序将无可监控目标。"
             )
+
+        ranges = self.get_video_date_ranges()
+        if ranges:
+            logger.info(f"视频日期过滤已启用：{self.describe_video_date_filter()}")
 
     def _get_default_ai_styles(self):
         """获取默认的AI回复风格配置"""
@@ -201,6 +282,64 @@ class ConfigManager:
 
     def get_app_config(self) -> Dict:
         return self.config.get('app', {})
+
+    def get_video_date_ranges(self) -> List[Tuple[Optional[date], Optional[date]]]:
+        """多段日期过滤。空列表表示不限制。
+
+        兼容：
+        - video_after / video_before 单段
+        - video_date_ranges 多段列表
+        """
+        app = self.get_app_config() or {}
+        ranges: List[Tuple[Optional[date], Optional[date]]] = []
+        seen = set()
+
+        def _add(item):
+            parsed = parse_date_range_item(item) if not isinstance(item, tuple) else item
+            if not parsed:
+                return
+            key = (parsed[0], parsed[1])
+            if key in seen:
+                return
+            seen.add(key)
+            ranges.append(parsed)
+
+        shorthand = _normalize_date_range(
+            parse_app_date(app.get("video_after")),
+            parse_app_date(app.get("video_before")),
+        )
+        if shorthand:
+            _add(shorthand)
+
+        raw = app.get("video_date_ranges")
+        if isinstance(raw, dict):
+            raw = [raw]
+        if isinstance(raw, (list, tuple)):
+            for item in raw:
+                _add(item)
+
+        return ranges
+
+    def get_video_date_filter(self) -> Tuple[Optional[date], Optional[date]]:
+        """兼容旧接口：返回第一段，或 (None, None) 表示不限制。"""
+        ranges = self.get_video_date_ranges()
+        if not ranges:
+            return None, None
+        return ranges[0]
+
+    def describe_video_date_filter(self) -> str:
+        ranges = self.get_video_date_ranges()
+        if not ranges:
+            return "不限制"
+        parts = []
+        for after, before in ranges:
+            if after and before:
+                parts.append(f"{after.isoformat()} 至 {before.isoformat()}")
+            elif after:
+                parts.append(f"{after.isoformat()} 及之后")
+            elif before:
+                parts.append(f"{before.isoformat()} 及之前")
+        return "；".join(parts) + "（含起止当天）"
 
     def get_ai_styles_config(self) -> Dict:
         """获取AI回复风格配置"""
