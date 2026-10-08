@@ -274,13 +274,15 @@
         });
         if (res.token) setToken(res.token);
         $("#loginPass").value = "";
-        // 确认会话真正生效后再进控制台
-        const ok = await ensureAuth();
-        if (!ok) {
-          throw new Error("登录成功但会话未生效，请强刷后再试");
+        showLogin(false);
+        try {
+          await afterLogin();
+          toast("登录成功");
+        } catch (e2) {
+          // 会话未带上时再退回登录页并提示
+          showLogin(true);
+          throw e2;
         }
-        await afterLogin();
-        toast("登录成功");
       } catch (e) {
         err.textContent = e.message;
         err.hidden = false;

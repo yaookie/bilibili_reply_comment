@@ -205,6 +205,10 @@ th { font-size: 0.82rem; color: var(--muted); font-weight: 600; background: #f8f
   backdrop-filter: blur(10px);
   padding: 20px;
 }
+/* 必须覆盖上面的 display:grid，否则 hidden 属性无效，会一直停在登录页 */
+.login-gate[hidden] {
+  display: none !important;
+}
 .login-card {
   width: min(400px, 100%);
   background: var(--surface);
