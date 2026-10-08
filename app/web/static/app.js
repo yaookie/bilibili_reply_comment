@@ -2,10 +2,12 @@
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
+  const TOKEN_KEY = "brc_token";
   const state = {
     styles: [],
     logs: [],
     ws: null,
+    token: sessionStorage.getItem(TOKEN_KEY) || "",
     authRequired: false,
     levelRank: { DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40 },
   };
@@ -18,6 +20,12 @@
     toast._t = setTimeout(() => { el.hidden = true; }, 2600);
   }
 
+  function setToken(token) {
+    state.token = token || "";
+    if (state.token) sessionStorage.setItem(TOKEN_KEY, state.token);
+    else sessionStorage.removeItem(TOKEN_KEY);
+  }
+
   function showLogin(show, username) {
     document.body.classList.toggle("locked", !!show);
     $("#loginGate").hidden = !show;
@@ -27,14 +35,16 @@
 
   async function api(path, options = {}) {
     const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+    if (state.token) headers.Authorization = `Bearer ${state.token}`;
     const res = await fetch(path, {
       ...options,
       headers,
-      credentials: "same-origin", // 仅依赖 HttpOnly Cookie，JS 读不到会话令牌
+      credentials: "include",
     });
     let data = null;
     try { data = await res.json(); } catch (_) {}
     if (res.status === 401 && path !== "/api/login") {
+      setToken("");
       showLogin(true);
       throw new Error("未登录或会话已过期");
     }
@@ -57,6 +67,7 @@
       if (st.username) $("#loginUser").value = st.username;
       return true;
     }
+    setToken("");
     showLogin(true, st.username || "admin");
     return false;
   }
@@ -125,8 +136,8 @@
       try { state.ws.close(); } catch (_) {}
     }
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    // Cookie 会随 WebSocket 握手自动带上，不把 token 放进 URL
-    const ws = new WebSocket(`${proto}://${location.host}/api/logs/ws`);
+    const q = state.token ? `?token=${encodeURIComponent(state.token)}` : "";
+    const ws = new WebSocket(`${proto}://${location.host}/api/logs/ws${q}`);
     state.ws = ws;
     $("#logConn").textContent = "连接中…";
     ws.onopen = () => { $("#logConn").textContent = "实时已连接"; };
@@ -254,15 +265,20 @@
       const err = $("#loginErr");
       err.hidden = true;
       try {
-        await api("/api/login", {
+        const res = await api("/api/login", {
           method: "POST",
           body: JSON.stringify({
-            username: $("#loginUser").value.trim(),
+            username: $("#loginUser").value.trim() || "admin",
             password: $("#loginPass").value,
           }),
         });
+        if (res.token) setToken(res.token);
         $("#loginPass").value = "";
-        showLogin(false);
+        // 确认会话真正生效后再进控制台
+        const ok = await ensureAuth();
+        if (!ok) {
+          throw new Error("登录成功但会话未生效，请强刷后再试");
+        }
         await afterLogin();
         toast("登录成功");
       } catch (e) {
@@ -272,6 +288,7 @@
     });
     $("#btnLogout").addEventListener("click", async () => {
       try { await api("/api/logout", { method: "POST" }); } catch (_) {}
+      setToken("");
       if (state.ws) { try { state.ws.close(); } catch (_) {} }
       showLogin(true);
       toast("已退出");

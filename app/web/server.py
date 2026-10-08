@@ -30,7 +30,7 @@ from .auth import (
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
-COOKIE_NAME = "brc_web_token"
+COOKIE_NAME = "brctoken"  # 避免个别代理对下划线 Cookie 名不友好
 
 
 class AppConfigUpdate(BaseModel):
@@ -127,9 +127,23 @@ def _is_public_path(path: str) -> bool:
     return False
 
 
+def _is_https_request(request: Request) -> bool:
+    if request.url.scheme == "https":
+        return True
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    return proto == "https"
+
+
 def create_app() -> FastAPI:
     # 永久关闭公开 API 文档，避免暴露接口结构
     app = FastAPI(title="B站自动回复控制台", docs_url=None, redoc_url=None, openapi_url=None)
+
+    # 识别 Nginx 反代的真实 scheme / IP
+    try:
+        from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
+        app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
+    except Exception:
+        pass
 
     @app.middleware("http")
     async def security_headers_middleware(request: Request, call_next):
@@ -139,8 +153,6 @@ def create_app() -> FastAPI:
         response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Cache-Control"] = "no-store"
         response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
-        # 不向跨站页面泄露
-        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
         return response
 
     @app.middleware("http")
@@ -188,14 +200,19 @@ def create_app() -> FastAPI:
         clear_login_fail(ip)
         token = create_session()
         logger.info(f"[Web] 登录成功 ip={ip}")
-        # 令牌只放 HttpOnly Cookie，不在 JSON 里回传，降低 XSS 窃取风险
-        resp = JSONResponse({"ok": True, "auth_required": True, "username": username})
+        # Cookie + JSON token 双通道：反代环境下 Cookie 偶发带不上时，前端可用 Bearer
+        resp = JSONResponse({
+            "ok": True,
+            "auth_required": True,
+            "username": username,
+            "token": token,
+        })
         resp.set_cookie(
             COOKIE_NAME,
             token,
             httponly=True,
-            samesite="strict",
-            secure=request.url.scheme == "https",
+            samesite="lax",
+            secure=_is_https_request(request),
             max_age=SESSION_TTL_SEC,
             path="/",
         )
@@ -244,9 +261,9 @@ def create_app() -> FastAPI:
 
     @app.websocket("/api/logs/ws")
     async def logs_ws(websocket: WebSocket):
-        # 仅接受 Cookie 会话，禁止把 token 放在 URL query（会进代理日志）
+        # Cookie 优先；反代异常时允许 ?token=（仅用于 WebSocket）
         if is_auth_enabled():
-            token = websocket.cookies.get(COOKIE_NAME)
+            token = websocket.cookies.get(COOKIE_NAME) or websocket.query_params.get("token")
             if not verify_session(token):
                 await websocket.close(code=4401)
                 return
