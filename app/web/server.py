@@ -406,7 +406,12 @@ def create_app() -> FastAPI:
 
 
 async def start_web_server(host: str = "127.0.0.1", port: int = 8787):
-    """在当前事件循环中启动 Web 控制台。"""
+    """启动 Web 控制台。
+
+    使用独立线程 + 独立事件循环运行 uvicorn，避免与 bilibili_api.sync
+    共用事件循环时出现“进程在跑但 8787 未监听”的问题。
+    """
+    import threading
     import uvicorn
 
     if require_password_for_host(host) and not is_auth_enabled():
@@ -416,24 +421,84 @@ async def start_web_server(host: str = "127.0.0.1", port: int = 8787):
         )
         return
 
-    log_buffer.bind_loop(asyncio.get_running_loop())
-    app = create_app()
-    config = uvicorn.Config(
-        app,
-        host=host,
-        port=port,
-        log_level="warning",
-        access_log=False,
-    )
-    server = uvicorn.Server(config)
+    ready = threading.Event()
+    errors: list = []
+
+    def _run():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            log_buffer.bind_loop(loop)
+            app = create_app()
+
+            @app.on_event("startup")
+            async def _on_startup():
+                log_buffer.bind_loop(asyncio.get_running_loop())
+                ready.set()
+
+            config = uvicorn.Config(
+                app,
+                host=host,
+                port=port,
+                log_level="warning",
+                access_log=False,
+            )
+            server = uvicorn.Server(config)
+            # 嵌入式运行，避免抢主进程信号
+            server.install_signal_handlers = False
+            loop.run_until_complete(server.serve())
+        except Exception as e:
+            errors.append(e)
+            ready.set()
+            logger.error(f"Web 控制台线程异常: {e}", exc_info=True)
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=_run, name="web-console", daemon=True)
+    thread.start()
+
+    # 最多等 8 秒确认端口起来
+    for _ in range(80):
+        if ready.is_set():
+            break
+        await asyncio.sleep(0.1)
+
+    if errors:
+        raise RuntimeError(f"Web 控制台启动失败: {errors[0]}") from errors[0]
+
+    if not ready.is_set():
+        # 再探测一次端口，兼容 startup 钩子未触发的情况
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    "127.0.0.1" if host in ("0.0.0.0", "::") else host,
+                    port,
+                ),
+                timeout=1.0,
+            )
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+        except Exception as e:
+            raise RuntimeError(
+                f"Web 控制台未能在 {host}:{port} 监听，请检查端口占用与依赖: {e}"
+            ) from e
+
     if is_auth_enabled():
         logger.info(
-            f"Web 控制台已启动（已启用密码保护）: http://{host}:{port}/  "
+            f"Web 控制台已监听（密码保护）: http://{host}:{port}/  "
             f"用户名: {get_web_username()}"
         )
     else:
         logger.info(
-            f"Web 控制台已启动（仅本机、未设密码）: http://{host}:{port}/  "
-            f"部署到服务器请设置 app.web_password，并将 web_host 改为 0.0.0.0"
+            f"Web 控制台已监听（未设密码，仅建议本机）: http://{host}:{port}/"
         )
-    await server.serve()
+
+    # 伴随主服务存活；线程为 daemon，主进程退出即结束
+    while thread.is_alive():
+        await asyncio.sleep(1.0)
