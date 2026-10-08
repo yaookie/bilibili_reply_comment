@@ -34,7 +34,7 @@ fi
 source "${VENV_DIR}/bin/activate"
 
 echo "[提示] 检查依赖包..."
-if ! python -c "import yaml, openai, bilibili_api" >/dev/null 2>&1; then
+if ! python -c "import yaml, openai, bilibili_api, fastapi, uvicorn" >/dev/null 2>&1; then
   echo "[提示] 安装依赖包..."
   pip install -r requirements.txt
 else
@@ -59,6 +59,7 @@ mkdir -p logs data
 
 echo "[信息] 启动时间: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "[信息] 按 Ctrl+C 停止程序"
+echo "[信息] Web 控制台默认: http://127.0.0.1:8787/"
 echo
 
 exec python bilibili_auto_reply.py

@@ -1096,6 +1096,21 @@ async def monitor_single_video(bvid: str, reply_template: str, interval: int,
 
     while True:
         try:
+            from .database import monitored_video_manager
+
+            live_cfg = monitored_video_manager.get_video(bvid)
+            if live_cfg is None:
+                logger.info(f"视频已从监控列表移除，停止任务: {bvid}")
+                break
+            if not live_cfg.get('enabled', True):
+                await asyncio.sleep(max(30, int(live_cfg.get('interval') or interval or 60)))
+                continue
+
+            reply_template = live_cfg.get('template') or reply_template
+            interval = int(live_cfg.get('interval') or interval or 60)
+            use_ai = bool(live_cfg.get('use_ai', use_ai))
+            ai_style = live_cfg.get('ai_style') or ai_style
+
             # 配置热加载由发现循环/低频检查即可，避免上百个监控任务同时刷磁盘
             await reply_to_new_comments(bvid, reply_template, use_ai, ai_style)
         except asyncio.CancelledError:
@@ -1105,3 +1120,10 @@ async def monitor_single_video(bvid: str, reply_template: str, interval: int,
             logger.error(f"{bvid} - 监控出错: {e}", exc_info=True)
 
         await asyncio.sleep(interval)
+
+    # 任务结束时释放占用，便于 Web 端重新添加同一 BV
+    try:
+        from .main import service
+        service._monitored_bvids.discard(bvid)
+    except Exception:
+        pass

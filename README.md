@@ -10,6 +10,7 @@
 - SQLite 记录已回复评论，避免重复回复
 - 配置热加载：运行中修改 `config.yaml` 会自动重载
 - 日志输出到控制台与 `logs/` 目录
+- **Web 控制台**：浏览器查看运行状态、实时日志、管理监控视频与配置（默认 `http://127.0.0.1:8787/`）
 
 ## 环境要求
 
@@ -70,6 +71,39 @@ python bilibili_auto_reply.py
 ```
 
 停止程序：按 `Ctrl+C`。
+
+启动后打开浏览器访问 **http://127.0.0.1:8787/** 即可使用控制台（无需一直盯着命令行窗口；可将窗口最小化）。关闭命令行窗口会结束进程，请用 `Ctrl+C` 正常退出，或使用下方后台启动方式。
+
+**Windows 后台启动（最小化窗口）：** 双击 `start_bg.bat`。
+
+### Web 控制台能做什么
+
+| 功能 | 说明 |
+|------|------|
+| 概览 | 监控视频数、累计回复、活跃任务、当前参数 |
+| 实时日志 | WebSocket 推送，关闭命令行也能看 |
+| 监控视频 | 添加 BV、启用/停用、改间隔、删除 |
+| 最近回复 | 查看近期自动回复记录 |
+| 配置 | 改间隔 / UID / AI / Cookie（敏感项掩码展示） |
+
+相关配置项（`config.yaml` → `app`）：
+
+```yaml
+web_enabled: true
+web_host: 127.0.0.1   # 仅本机；服务器/局域网改为 0.0.0.0
+web_port: 8787
+web_username: admin
+web_password: '你的强密码'   # 对外访问必须设置；未设则拒绝 0.0.0.0 监听
+```
+
+**访问控制与隐私保护：**
+
+- 本机 `127.0.0.1`：可不设密码（方便本机调试）
+- 服务器 `0.0.0.0`：**必须**设置 `web_password`，否则控制台不会启动
+- 设密码后需登录；会话为 HttpOnly Cookie（JS 读不到），失败过多会临时锁定
+- **Cookie / API Key / 控制台密码永不通过接口回传**（页面只显示「已配置」）
+- 实时日志会脱敏常见密钥字段；已关闭公开 API 文档
+- 建议再加防火墙或 Nginx 反代 + HTTPS，不要把控制台裸奔到公网
 
 ## 如何获取 B站 Cookie
 
@@ -234,13 +268,16 @@ bilibili_reply_comment/
 ├── requirements.txt         # Python 依赖
 ├── start.sh                 # macOS / Linux 启动脚本
 ├── start.bat                # Windows 启动脚本
+├── start_bg.bat             # Windows 最小化后台启动
 ├── app/                     # 业务包
 │   ├── main.py              # 服务编排与生命周期
 │   ├── config.py            # 配置加载 / 校验 / 热更新
 │   ├── api_clients.py       # B站凭证与千问客户端
 │   ├── video_monitor.py     # 评论拉取、回复、视频发现
 │   ├── database.py          # SQLite 持久化
-│   └── logger.py            # 日志
+│   ├── logger.py            # 日志
+│   ├── log_buffer.py        # 内存日志缓冲（供 Web 实时推送）
+│   └── web/                 # Web 控制台（FastAPI + 静态页）
 ├── docs/images/             # README 配图
 ├── data/                    # 运行数据（自动创建）
 │   └── bilibili_reply.db    # 回复记录、已发现视频、监控视频列表

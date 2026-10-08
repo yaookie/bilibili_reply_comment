@@ -527,3 +527,140 @@ class ConfigManager:
         except Exception as e:
             from .logger import logger
             logger.error(f"保存配置文件失败: {e}")
+            raise
+
+    @staticmethod
+    def _is_masked_or_placeholder(value) -> bool:
+        if value is None:
+            return True
+        text = str(value).strip()
+        if not text:
+            return True
+        if '****' in text or text.startswith('请填写'):
+            return True
+        return False
+
+    # Web 接口禁止读写的敏感 / 内部控制字段
+    _WEB_APP_BLOCKLIST = frozenset({
+        'web_password', 'web_username',
+        # 避免通过 Web 改监听地址后绕过启动时的密码校验
+        'web_host', 'web_port', 'web_enabled',
+    })
+    def update_from_web(self, payload: Dict) -> Dict:
+        """根据 Web 控制台提交的内容更新配置并落盘。
+
+        - 敏感字段仅允许「写入新值」，永不回读
+        - 空值 / 占位符不会覆盖已有密钥
+        - web_password 等控制项禁止经 Web 修改
+        """
+        if not isinstance(payload, dict):
+            raise ValueError("配置数据格式错误")
+
+        cfg = self.config
+
+        if 'app' in payload and isinstance(payload['app'], dict):
+            app = cfg.setdefault('app', {})
+            for key, value in payload['app'].items():
+                if key in self._WEB_APP_BLOCKLIST:
+                    continue
+                app[key] = value
+
+        if 'qwen' in payload and isinstance(payload['qwen'], dict):
+            qwen = cfg.setdefault('qwen', {})
+            for key, value in payload['qwen'].items():
+                if key == 'api_key':
+                    if self._is_masked_or_placeholder(value):
+                        continue
+                    qwen[key] = value
+                    continue
+                if key in ('base_url', 'model'):
+                    qwen[key] = value
+
+        if 'bilibili' in payload and isinstance(payload['bilibili'], dict):
+            bili = payload['bilibili']
+            cred_in = bili.get('credential') if isinstance(bili.get('credential'), dict) else bili
+            if not isinstance(cred_in, dict):
+                cred_in = {}
+            cred = cfg.setdefault('bilibili', {}).setdefault('credential', {})
+            for key in ('sessdata', 'bili_jct', 'buvid3', 'dedeuserid', 'ac_time_value'):
+                if key not in cred_in:
+                    continue
+                value = cred_in.get(key)
+                if self._is_masked_or_placeholder(value):
+                    continue
+                cred[key] = str(value).strip()
+
+        if 'ai_reply_styles' in payload and isinstance(payload['ai_reply_styles'], dict):
+            cfg['ai_reply_styles'] = payload['ai_reply_styles']
+
+        self._validate_config()
+        self.save_config_to_file()
+        return self.get_public_config()
+
+    @staticmethod
+    def _is_secret_configured(value) -> bool:
+        if value is None:
+            return False
+        text = str(value).strip()
+        return bool(text) and not text.startswith('请填写')
+
+    def get_public_config(self) -> Dict:
+        """返回可供前端展示的配置。
+
+        安全约定：Cookie / API Key / 控制台密码等敏感值一律不返回
+        （包括掩码片段也不返回），只返回是否已配置等布尔状态。
+        """
+        cfg = self.config
+        cred = (cfg.get('bilibili') or {}).get('credential') or {}
+        qwen = cfg.get('qwen') or {}
+        raw_app = cfg.get('app') or {}
+
+        # 白名单：仅暴露业务可编辑项，绝不带出密码等
+        app_public = {
+            'default_check_interval': raw_app.get('default_check_interval', 60),
+            'log_level': raw_app.get('log_level', 'INFO'),
+            'uploader_uid': str(raw_app.get('uploader_uid') or ''),
+            'video_discovery_interval': raw_app.get('video_discovery_interval', 3600),
+            'default_ai_style': raw_app.get('default_ai_style', 'natural'),
+            'video_after': raw_app.get('video_after') or '',
+            'video_before': raw_app.get('video_before') or '',
+            'video_date_ranges': raw_app.get('video_date_ranges') or [],
+            'video_full_sync_on_start': bool(raw_app.get('video_full_sync_on_start', False)),
+        }
+
+        cred_flags = {
+            key: self._is_secret_configured(cred.get(key))
+            for key in ('sessdata', 'bili_jct', 'buvid3', 'ac_time_value')
+        }
+        # DedeUserID 是 UP 号，可展示；仍做占位过滤
+        dede = cred.get('dedeuserid')
+        dede_public = ''
+        if self._is_secret_configured(dede):
+            dede_public = str(dede).strip()
+
+        return {
+            'app': app_public,
+            'qwen': {
+                'api_key_configured': self._is_secret_configured(qwen.get('api_key')),
+                'base_url': qwen.get('base_url', ''),
+                'model': qwen.get('model', ''),
+            },
+            'bilibili': {
+                'credential_configured': cred_flags,
+                'dedeuserid': dede_public,
+                'configured': all(
+                    self._is_secret_configured(cred.get(k))
+                    for k in ('sessdata', 'bili_jct', 'buvid3', 'dedeuserid')
+                ),
+            },
+            # 风格只给 id/名称，不回传完整提示词
+            'ai_reply_styles': {
+                k: {'name': (v or {}).get('name', k)}
+                for k, v in (cfg.get('ai_reply_styles') or {}).items()
+            },
+            'date_filter': self.describe_video_date_filter(),
+            'security': {
+                'web_password_configured': self._is_secret_configured(raw_app.get('web_password')),
+                'auth_required': self._is_secret_configured(raw_app.get('web_password')),
+            },
+        }

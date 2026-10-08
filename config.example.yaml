@@ -121,6 +121,15 @@ app:
   #   - after: 2026-09-10          # 该日起之后
   #   - '2024-01-01至2024-03-31'   # 也可用一串文字
   video_date_ranges: []
+  # Web 控制台：浏览器查看运行状态 / 日志 / 改配置
+  # 默认仅本机访问（127.0.0.1）。部署到服务器请：
+  #   1) web_host 改为 0.0.0.0（或配合 Nginx 反代）
+  #   2) 必须设置 web_password（未设密码时拒绝对外监听）
+  web_enabled: true
+  web_host: 127.0.0.1
+  web_port: 8787
+  web_username: admin
+  web_password: ''          # 服务器部署务必填写强密码
 
 # ---------- 手动监控视频（可选种子）----------
 # 监控列表默认保存在 data/bilibili_reply.db 的 monitored_videos 表中，

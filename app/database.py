@@ -204,6 +204,50 @@ class DatabaseManager:
         cursor.close()
         return count
 
+    def get_total_replied_count(self) -> int:
+        """获取全部已回复评论数量"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM replied_comments')
+        count = cursor.fetchone()[0]
+        cursor.close()
+        return count
+
+    def list_recent_replies(self, limit: int = 50, bvid: str = None) -> list:
+        """最近回复记录（新到旧）"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        limit = max(1, min(int(limit or 50), 200))
+        if bvid:
+            cursor.execute(
+                '''SELECT bvid, rpid, username, message, mid, user_comment_time, ai_reply, replied_at
+                   FROM replied_comments WHERE bvid = ?
+                   ORDER BY replied_at DESC, id DESC LIMIT ?''',
+                (bvid, limit),
+            )
+        else:
+            cursor.execute(
+                '''SELECT bvid, rpid, username, message, mid, user_comment_time, ai_reply, replied_at
+                   FROM replied_comments
+                   ORDER BY replied_at DESC, id DESC LIMIT ?''',
+                (limit,),
+            )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [
+            {
+                'bvid': row[0],
+                'rpid': row[1],
+                'username': row[2],
+                'message': row[3],
+                'mid': row[4],
+                'user_comment_time': row[5],
+                'ai_reply': row[6],
+                'replied_at': row[7],
+            }
+            for row in rows
+        ]
+
     # 视频发现相关方法
     def is_video_discovered(self, uid: str, bvid: str) -> bool:
         """检查视频是否已被发现"""
@@ -394,6 +438,30 @@ class DatabaseManager:
         cursor.close()
         return count
 
+    def set_monitored_enabled(self, bvid: str, enabled: bool) -> bool:
+        """启用/停用监控视频"""
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            'UPDATE monitored_videos SET enabled = ?, updated_at = ? WHERE bvid = ?',
+            (1 if enabled else 0, now, bvid),
+        )
+        changed = cursor.rowcount > 0
+        conn.commit()
+        cursor.close()
+        return changed
+
+    def delete_monitored_video(self, bvid: str) -> bool:
+        """从监控列表删除视频"""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM monitored_videos WHERE bvid = ?', (bvid,))
+        changed = cursor.rowcount > 0
+        conn.commit()
+        cursor.close()
+        return changed
+
     # ---------- 元数据 ----------
     def get_meta(self, key: str, default: str = None) -> str | None:
         conn = self._get_connection()
@@ -509,6 +577,14 @@ class ReplyRecordManager:
         self.initialize()
         return database_manager.get_replied_count(bvid)
 
+    def get_total_count(self):
+        self.initialize()
+        return database_manager.get_total_replied_count()
+
+    def list_recent(self, limit: int = 50, bvid: str = None):
+        self.initialize()
+        return database_manager.list_recent_replies(limit=limit, bvid=bvid)
+
 
 reply_record_manager = ReplyRecordManager()
 
@@ -589,6 +665,14 @@ class MonitoredVideoManager:
     def count(self, enabled_only: bool = True) -> int:
         self.initialize()
         return database_manager.get_monitored_count(enabled_only=enabled_only)
+
+    def set_enabled(self, bvid: str, enabled: bool) -> bool:
+        self.initialize()
+        return database_manager.set_monitored_enabled(bvid, enabled)
+
+    def delete(self, bvid: str) -> bool:
+        self.initialize()
+        return database_manager.delete_monitored_video(bvid)
 
     def backfill_from_discovered(self, template: str = None, interval: int = None,
                                  use_ai: bool = True, ai_style: str = None,

@@ -364,6 +364,25 @@ async def main():
     except (ValueError, OSError):
         logger.warning("无法注册信号处理器")
 
+    # Web 控制台（与监控任务同进程，浏览器可查看状态；命令行可最小化）
+    web_task = None
+    web_enabled = app_config.get('web_enabled', True)
+    if web_enabled is not False:
+        web_host = str(app_config.get('web_host') or '127.0.0.1')
+        web_port = int(app_config.get('web_port') or 8787)
+
+        async def _run_web_console():
+            try:
+                from .web import start_web_server
+                logger.info(f"请在浏览器打开控制台: http://{web_host}:{web_port}/")
+                await start_web_server(web_host, web_port)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.error(f"Web 控制台异常退出（监控仍会继续）: {e}", exc_info=True)
+
+        web_task = asyncio.create_task(_run_web_console())
+
     try:
         await service.run()
     except KeyboardInterrupt:
@@ -372,3 +391,9 @@ async def main():
         logger.error(f"服务异常: {e}", exc_info=True)
     finally:
         service.stop()
+        if web_task and not web_task.done():
+            web_task.cancel()
+            try:
+                await web_task
+            except asyncio.CancelledError:
+                pass

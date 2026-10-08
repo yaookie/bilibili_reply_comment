@@ -41,7 +41,7 @@ call "%VENV_DIR%\Scripts\activate.bat"
 
 :: 检查并安装依赖
 echo [提示] 检查依赖包...
-python -c "import yaml, openai, bilibili_api" >nul 2>&1
+python -c "import yaml, openai, bilibili_api, fastapi, uvicorn" >nul 2>&1
 if %errorlevel% neq 0 (
     echo [提示] 安装依赖包...
     pip install -r requirements.txt
@@ -70,6 +70,7 @@ if not exist "data" mkdir data
 
 echo [信息] 启动时间: %date% %time%
 echo [信息] 按 Ctrl+C 停止程序
+echo [信息] Web 控制台默认: http://127.0.0.1:8787/
 echo.
 
 python bilibili_auto_reply.py

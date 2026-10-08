@@ -95,6 +95,11 @@ class QwenClient:
 
         return self._client, self._model
 
+    def reset(self):
+        """清除缓存的客户端（API Key 更新后可调用）"""
+        self._client = None
+        self._model = None
+
 
 def generate_humorous_reply(video_title: str, video_desc: str, video_url: str,
                             comment_username: str, comment_message: str,

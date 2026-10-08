@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>B站自动回复控制台</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="bg-grid" aria-hidden="true"></div>
+
+  <div id="loginGate" class="login-gate" hidden>
+    <form id="loginForm" class="login-card">
+      <div class="brand">
+        <span class="brand-mark">哔</span>
+        <div>
+          <h1>控制台登录</h1>
+          <p>仅本人可访问，请输入配置中的密码</p>
+        </div>
+      </div>
+      <label>用户名<input name="username" id="loginUser" autocomplete="username" /></label>
+      <label>密码<input name="password" id="loginPass" type="password" autocomplete="current-password" required /></label>
+      <button class="btn primary" type="submit">登录</button>
+      <p id="loginErr" class="login-err" hidden></p>
+    </form>
+  </div>
+
+  <div id="appShell">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">哔</span>
+      <div>
+        <h1>自动回复控制台</h1>
+        <p>运行状态 · 实时日志 · 配置管理</p>
+      </div>
+    </div>
+    <div class="top-actions">
+      <span id="runBadge" class="badge badge-off">未运行</span>
+      <button id="btnRefresh" class="btn ghost" type="button">刷新</button>
+      <button id="btnLogout" class="btn ghost" type="button" hidden>退出</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab active" data-tab="overview" type="button">概览</button>
+    <button class="tab" data-tab="logs" type="button">实时日志</button>
+    <button class="tab" data-tab="videos" type="button">监控视频</button>
+    <button class="tab" data-tab="replies" type="button">最近回复</button>
+    <button class="tab" data-tab="config" type="button">配置</button>
+  </nav>
+
+  <main>
+    <section id="panel-overview" class="panel active">
+      <div class="stat-grid" id="statGrid">
+        <article class="stat"><span class="label">监控中</span><strong id="statEnabled">-</strong><em>已启用视频</em></article>
+        <article class="stat"><span class="label">全部视频</span><strong id="statTotal">-</strong><em>含已停用</em></article>
+        <article class="stat"><span class="label">累计回复</span><strong id="statReplies">-</strong><em>历史记录</em></article>
+        <article class="stat"><span class="label">活跃任务</span><strong id="statTasks">-</strong><em>后台协程</em></article>
+      </div>
+      <div class="info-card">
+        <h2>当前参数</h2>
+        <dl class="kv" id="overviewMeta"></dl>
+      </div>
+    </section>
+
+    <section id="panel-logs" class="panel">
+      <div class="toolbar">
+        <label class="check"><input type="checkbox" id="logAutoScroll" checked /> 自动滚动</label>
+        <select id="logLevelFilter">
+          <option value="ALL">全部级别</option>
+          <option value="DEBUG">DEBUG+</option>
+          <option value="INFO">INFO+</option>
+          <option value="WARNING">WARNING+</option>
+          <option value="ERROR">ERROR</option>
+        </select>
+        <button id="btnClearLogs" class="btn ghost" type="button">清空显示</button>
+        <span id="logConn" class="muted">连接中…</span>
+      </div>
+      <div id="logView" class="log-view" aria-live="polite"></div>
+    </section>
+
+    <section id="panel-videos" class="panel">
+      <div class="toolbar wrap">
+        <form id="addVideoForm" class="inline-form">
+          <input name="bvid" placeholder="BV 号" required />
+          <input name="title" placeholder="标题（可选）" />
+          <select name="ai_style" id="addAiStyle"></select>
+          <label class="check"><input type="checkbox" name="use_ai" checked /> AI</label>
+          <button class="btn primary" type="submit">添加监控</button>
+        </form>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>视频</th>
+              <th>风格</th>
+              <th>间隔</th>
+              <th>回复数</th>
+              <th>状态</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="videoBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="panel-replies" class="panel">
+      <div class="toolbar">
+        <button id="btnRefreshReplies" class="btn ghost" type="button">刷新回复</button>
+      </div>
+      <div id="replyList" class="reply-list"></div>
+    </section>
+
+    <section id="panel-config" class="panel">
+      <form id="configForm" class="config-form">
+        <fieldset>
+          <legend>应用设置</legend>
+          <div class="form-grid">
+            <label>UP 主 UID<input name="uploader_uid" /></label>
+            <label>默认检查间隔（秒）<input name="default_check_interval" type="number" min="10" /></label>
+            <label>发现间隔（秒）<input name="video_discovery_interval" type="number" min="60" /></label>
+            <label>默认 AI 风格<select name="default_ai_style" id="cfgDefaultStyle"></select></label>
+            <label>日志级别
+              <select name="log_level">
+                <option>DEBUG</option>
+                <option>INFO</option>
+                <option>WARNING</option>
+                <option>ERROR</option>
+              </select>
+            </label>
+            <label>投稿起始日 video_after<input name="video_after" placeholder="2026-09-10" /></label>
+            <label>投稿截止日 video_before<input name="video_before" placeholder="留空=不限" /></label>
+          </div>
+          <p class="hint" id="dateFilterHint"></p>
+        </fieldset>
+
+        <fieldset>
+          <legend>千问 / DashScope</legend>
+          <div class="form-grid">
+            <label class="wide">API Key<input name="qwen_api_key" autocomplete="off" placeholder="已配置则留空不修改" /></label>
+            <label class="wide">Base URL<input name="qwen_base_url" /></label>
+            <label>模型<input name="qwen_model" /></label>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>B站 Cookie</legend>
+          <p class="hint">已配置项显示为掩码。只填写需要更新的字段即可。</p>
+          <div class="form-grid">
+            <label class="wide">SESSDATA<input name="sessdata" autocomplete="off" /></label>
+            <label>bili_jct<input name="bili_jct" autocomplete="off" /></label>
+            <label>buvid3<input name="buvid3" autocomplete="off" /></label>
+            <label>DedeUserID<input name="dedeuserid" /></label>
+            <label class="wide">ac_time_value<input name="ac_time_value" autocomplete="off" /></label>
+          </div>
+        </fieldset>
+
+        <div class="form-actions">
+          <button class="btn primary" type="submit">保存配置</button>
+          <span id="configMsg" class="muted"></span>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

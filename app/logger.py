@@ -116,6 +116,15 @@ def setup_logger(log_level: str = "INFO", log_file: str = None):
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
+    # Web 控制台实时日志
+    try:
+        from .log_buffer import MemoryLogHandler, log_buffer
+        memory_handler = MemoryLogHandler(log_buffer)
+        memory_handler.setFormatter(formatter)
+        logger.addHandler(memory_handler)
+    except Exception:
+        pass
+
     return logger
 
 
